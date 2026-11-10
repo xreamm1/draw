@@ -11,6 +11,13 @@
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; -webkit-touch-callout: none; cursor: crosshair }
   #reference { position: fixed; top: 0; left: 0; max-width: none; transform-origin: 0 0;
     opacity: .32; pointer-events: none; user-select: none }
+  #scheme-playback:not([hidden]) { position: fixed; right: max(12px, env(safe-area-inset-right));
+    bottom: 65px; display: flex; align-items: center; gap: 5px; padding: 5px;
+    background: white; border: 1px solid #d9e0e8; border-radius: 10px }
+  #scheme-time { width: clamp(80px, 30vw, 220px) }
+  @media (pointer: coarse), (max-width: 540px) {
+    #scheme-playback:not([hidden]) { top: calc(58px + env(safe-area-inset-top)); bottom: auto }
+  }
   dialog { max-width: min(420px, calc(100% - 24px)); border: 1px solid #d9e0e8;
     border-radius: 12px; color: inherit; padding: 16px }
   dialog::backdrop { background: #18223055 }
@@ -73,6 +80,12 @@
 <body>
 <canvas id="board" aria-label="Холст общей доски"></canvas>
 <img id="reference" alt="" hidden>
+<div id="scheme-playback" role="group" aria-label="Видео схемы" hidden>
+  <button id="scheme-play" type="button">Пуск</button>
+  <button id="scheme-back" type="button" aria-label="Назад на 0,1 секунды">−0,1 с</button>
+  <input id="scheme-time" type="range" min="0" max="0" step="0.01" value="0" aria-label="Позиция в видео">
+  <button id="scheme-forward" type="button" aria-label="Вперёд на 0,1 секунды">+0,1 с</button>
+</div>
 <div id="remote-cursors" aria-hidden="true"></div>
 <header>
   <nav aria-label="Инструменты рисования">
@@ -115,7 +128,9 @@
   </form>
   <div id="admin-tools" hidden>
     <button id="scheme">Схема</button>
-    <input id="scheme-file" type="file" accept="image/*" hidden>
+    <input id="scheme-file" type="file" accept="image/*,video/*,.gif,.mp4,.webm,.mov,.m4v,.ogv" hidden>
+    <button id="scheme-toggle" disabled>Скрыть схему</button>
+    <label>Прозрачность схемы <input id="scheme-transparency" type="range" min="0" max="100" value="68" disabled></label>
     <button id="scheme-remove" disabled>Удалить схему</button>
     <button id="clear-board">Удалить всё с общей доски</button>
     <button id="sign-out">Выйти</button>
@@ -250,7 +265,13 @@ const adminMessage = document.querySelector("#admin-message");
 const clearBoard = document.querySelector("#clear-board");
 const schemeFile = document.querySelector("#scheme-file");
 const schemeRemove = document.querySelector("#scheme-remove");
-const reference = document.querySelector("#reference");
+let reference = document.querySelector("#reference");
+const schemeToggle = document.querySelector("#scheme-toggle");
+const schemeTransparency = document.querySelector("#scheme-transparency");
+const schemePlayback = document.querySelector("#scheme-playback");
+const schemePlay = document.querySelector("#scheme-play");
+const schemeTime = document.querySelector("#scheme-time");
+let schemeLoad = 0;
 let scheme = null;
 let adminAvailable = false;
 let taps = 0, lastTap = 0;
@@ -265,50 +286,131 @@ status.onclick = () => {
   if (!panel.open) panel.showModal();
 };
 document.querySelector("#scheme").onclick = () => schemeFile.click();
-schemeRemove.onclick = () => {
+function refreshSchemeControls() {
+  const video = scheme?.video ? reference : null;
+  schemeToggle.disabled = schemeTransparency.disabled = schemeRemove.disabled = !scheme;
+  schemeToggle.textContent = reference.hidden && scheme ? "Показать схему" : "Скрыть схему";
+  reference.style.opacity = String(1 - Number(schemeTransparency.value) / 100);
+  schemePlayback.hidden = !video || reference.hidden;
+  if (video) {
+    schemePlay.textContent = video.paused ? "Пуск" : "Пауза";
+    schemeTime.max = Number.isFinite(video.duration) ? video.duration : 0;
+    schemeTime.value = video.currentTime;
+  }
+}
+
+function playScheme() {
+  reference.play().catch(() => refreshSchemeControls());
+}
+
+schemeToggle.onclick = () => {
   if (!scheme) return;
-  URL.revokeObjectURL(scheme.url);
-  scheme = null;
+  reference.hidden = !reference.hidden;
+  if (scheme.video) {
+    if (reference.hidden) {
+      scheme.resume = !reference.paused;
+      reference.pause();
+    } else if (scheme.resume) playScheme();
+  }
+  refreshSchemeControls();
+};
+schemeTransparency.oninput = refreshSchemeControls;
+schemePlay.onclick = () => {
+  if (!scheme?.video) return;
+  if (reference.paused) playScheme();
+  else reference.pause();
+};
+function seekScheme(time) {
+  if (!scheme?.video || !Number.isFinite(reference.duration)) return;
+  reference.pause();
+  reference.currentTime = Math.max(0, Math.min(reference.duration, time));
+  refreshSchemeControls();
+}
+schemeTime.oninput = () => seekScheme(Number(schemeTime.value));
+document.querySelector("#scheme-back").onclick = () => seekScheme(reference.currentTime - .1);
+document.querySelector("#scheme-forward").onclick = () => seekScheme(reference.currentTime + .1);
+
+function releaseScheme() {
+  if (!scheme) return;
+  if (scheme.video) reference.pause();
   reference.hidden = true;
   reference.removeAttribute("src");
-  schemeRemove.disabled = true;
+  if (scheme.video) reference.load();
+  URL.revokeObjectURL(scheme.url);
+  scheme = null;
+}
+schemeRemove.onclick = () => {
+  ++schemeLoad;
+  releaseScheme();
+  refreshSchemeControls();
 };
+
 schemeFile.onchange = async () => {
   const file = schemeFile.files[0];
   schemeFile.value = "";
   if (!file) return;
+  const version = ++schemeLoad;
   const url = URL.createObjectURL(file);
-  const image = new Image();
-  image.src = url;
+  const video = file.type.startsWith("video/") || /\.(mp4|webm|mov|m4v|ogv)$/i.test(file.name);
+  const media = video ? document.createElement("video") : new Image();
+  let timer;
   try {
-    await image.decode();
-    if (scheme) URL.revokeObjectURL(scheme.url);
+    if (video) {
+      media.muted = media.playsInline = media.loop = true;
+      media.preload = "auto";
+      await new Promise((resolve, reject) => {
+        media.onloadedmetadata = resolve;
+        media.onerror = reject;
+        timer = setTimeout(reject, 15000);
+        media.src = url;
+      });
+    } else {
+      media.alt = "";
+      media.src = url;
+      await media.decode();
+    }
+    if (version !== schemeLoad) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    const width = video ? media.videoWidth : media.naturalWidth;
+    const height = video ? media.videoHeight : media.naturalHeight;
+    if (!width || !height) throw new Error("missing dimensions");
     const cos = Math.abs(camera.cos), sin = Math.abs(camera.sin);
-    const projectedWidth = image.naturalWidth * cos + image.naturalHeight * sin;
-    const projectedHeight = image.naturalWidth * sin + image.naturalHeight * cos;
+    const projectedWidth = width * cos + height * sin;
+    const projectedHeight = width * sin + height * cos;
     const scale = Math.min(board.clientWidth * .85 / projectedWidth,
       board.clientHeight * .8 / projectedHeight, 1) / camera.zoom;
-    const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
+    const w = width * scale, h = height * scale;
     const [cx, cy] = world([board.clientWidth / 2, board.clientHeight / 2]);
-    scheme = { url, x: cx - w / 2, y: cy - h / 2, w, h };
-    reference.src = url;
-    reference.hidden = false;
-    schemeRemove.disabled = false;
+    releaseScheme();
+    scheme = { url, video, x: cx - w / 2, y: cy - h / 2, w, h };
+    media.id = "reference";
+    reference.replaceWith(media);
+    reference = media;
+    if (video) {
+      media.onloadedmetadata = media.onerror = null;
+      media.onplay = media.onpause = media.ontimeupdate = refreshSchemeControls;
+    }
     positionScheme();
+    refreshSchemeControls();
+    if (video) playScheme();
     adminMessage.textContent = "";
   } catch {
     URL.revokeObjectURL(url);
-    adminMessage.textContent = "Не удалось открыть изображение";
+    if (version === schemeLoad) adminMessage.textContent = "Браузер не смог открыть этот файл.";
+  } finally {
+    clearTimeout(timer);
   }
 };
 
 function positionScheme() {
   if (!scheme) return;
   const { x, y, w, h } = scheme;
-  reference.style.width = w + "px";
-  reference.style.height = h + "px";
+  reference.style.width = (w * camera.zoom) + "px";
+  reference.style.height = (h * camera.zoom) + "px";
   const [left, top] = view([x, y]);
-  reference.style.transform = `translate(${left}px,${top}px) rotate(${camera.angle}rad) scale(${camera.zoom})`;
+  reference.style.transform = `translate(${left}px,${top}px) rotate(${camera.angle}rad)`;
 }
 let tool = "brush", space = false, pan = null, stroke = null;
 let ordered = [], painted = 0, dirty = true, rebuildOrder = false, frame = 0, localId = 0;
@@ -779,13 +881,16 @@ function blur(points, width, group) {
 }
 
 function sampleScheme(point) {
-  if (!scheme || !reference.complete || !reference.naturalWidth) return null;
+  if (!scheme || reference.hidden || schemeTransparency.value === "100") return null;
+  if (scheme.video ? reference.readyState < 2 : !reference.complete) return null;
+  const width = scheme.video ? reference.videoWidth : reference.naturalWidth;
+  const height = scheme.video ? reference.videoHeight : reference.naturalHeight;
   const [x, y] = world(point);
   const u = (x - scheme.x) / scheme.w, v = (y - scheme.y) / scheme.h;
   if (u < 0 || v < 0 || u >= 1 || v >= 1) return null;
   const sample = surface(1, 1).getContext("2d");
-  sample.drawImage(reference, Math.floor(u * reference.naturalWidth),
-    Math.floor(v * reference.naturalHeight), 1, 1, 0, 0, 1, 1);
+  sample.drawImage(reference, Math.floor(u * width),
+    Math.floor(v * height), 1, 1, 0, 0, 1, 1);
   const rgba = sample.getImageData(0, 0, 1, 1).data;
   return rgba[3] ? rgba : null;
 }
@@ -879,7 +984,7 @@ function endStroke(commit = true) {
 
 function transformView(from, to, factor, turn = 0) {
   const anchor = world(from);
-  camera.zoom = Math.max(0.05, Math.min(32, camera.zoom * factor));
+  camera.zoom = Math.max(1e-12, Math.min(32, camera.zoom * factor));
   camera.angle = Math.atan2(Math.sin(camera.angle + turn), Math.cos(camera.angle + turn));
   if (Math.abs(camera.angle) < 1e-8) camera.angle = 0;
   camera.cos = Math.cos(camera.angle);
