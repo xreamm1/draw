@@ -1000,7 +1000,7 @@ function valid(a) {
     && a.points.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite));
 }
 
-function receive(id, action, image, destination = actions) {
+function receive(id, action, image, destination = actions, deferRender = false) {
   const existed = destination.has(id);
   if (!valid(action)) {
     if (existed) remove(id, destination);
@@ -1029,7 +1029,7 @@ function receive(id, action, image, destination = actions) {
       if (layersPanel.open) updateLayers();
     }
   }
-  if (destination === activeActions()) {
+  if (destination === activeActions() && !deferRender) {
     if (!rebuildOrder && !existed && (!ordered.length || id > ordered[ordered.length - 1])) ordered.push(id);
     else {
       if (!existed) rebuildOrder = true;
@@ -1122,20 +1122,41 @@ async function connect() {
     const database = db.getDatabase(app);
     let auth;
     const log = db.ref(database, "whiteboard/actions");
-    let ready = false, online = false, denied = false, writeError = false;
-    const report = () => {
-      status.textContent = denied ? "Локальная доска · Доступ к базе закрыт" : writeError ? "Не удалось сохранить изменение"
-        : !ready ? "Загрузка общей доски…" : online ? "Общая доска · В сети" : "Нет связи · Изменения в очереди";
-    };
-    const fail = () => { loading = false; denied = true; writeAction = null; report(); };
-    db.onValue(db.ref(database, ".info/connected"), s => { online = s.val(); report(); });
-    let initialReceived = false, historyReady = false, guestReady = false, queueFrame = 0;
+    let online = false, denied = false, writeError = false;
+    let previewReady = false, initialReceived = false, historyReady = false, guestReady = false, queueFrame = 0;
     const history = [];
+    const previewIds = new Set();
     let nextAction = 0;
 
-    function applyHistoryChange(change, snapshot) {
+    function report() {
+      status.textContent = denied ? "Локальная доска · Доступ к базе закрыт"
+        : writeError ? "Не удалось сохранить изменение"
+        : !historyReady ? (previewReady ? "Догружаем историю…" : "Загрузка общей доски…")
+        : !guestReady ? "Подключение к общей доске…"
+        : online ? "Общая доска · В сети" : "Нет связи · Изменения в очереди";
+    }
+    function fail() {
+      loading = false;
+      denied = true;
+      writeAction = null;
+      report();
+    }
+    db.onValue(db.ref(database, ".info/connected"), s => { online = s.val(); report(); });
+
+    function applyHistoryChange(change, snapshot, deferRender = false) {
       if (change === "remove") remove(snapshot.key);
-      else if (change === "change" || !actions.has(snapshot.key)) receive(snapshot.key, snapshot.val());
+      else if (change === "change" || !actions.has(snapshot.key)) {
+        receive(snapshot.key, snapshot.val(), null, actions, deferRender && change === "add");
+      }
+    }
+
+    function completeHistory() {
+      historyReady = true;
+      if (previewReady && !animationMode) {
+        rebuildOrder = true;
+        redraw();
+      }
+      enableDrawing();
     }
 
     function drainHistory() {
@@ -1143,53 +1164,75 @@ async function connect() {
       const deadline = performance.now() + 5;
       do {
         const [change, snapshot] = history[nextAction++];
-        applyHistoryChange(change, snapshot);
+        applyHistoryChange(change, snapshot, previewReady);
       } while (nextAction < history.length && performance.now() < deadline);
       if (nextAction < history.length) queueFrame = requestAnimationFrame(drainHistory);
       else {
         history.length = nextAction = 0;
-        if (initialReceived) {
-          historyReady = true;
-          enableDrawing();
-        }
+        if (initialReceived) completeHistory();
       }
     }
 
     function handle(change, snapshot) {
-      if (historyReady) {
-        applyHistoryChange(change, snapshot);
-      } else {
+      if (historyReady) applyHistoryChange(change, snapshot);
+      else {
         history.push([change, snapshot]);
         if (!queueFrame) queueFrame = requestAnimationFrame(drainHistory);
       }
     }
-    db.onChildAdded(log, s => handle("add", s), fail);
-    db.onChildChanged(log, s => handle("change", s), fail);
-    db.onChildRemoved(log, s => handle("remove", s), fail);
-    db.onValue(log, () => {
-      initialReceived = true;
-      if (!queueFrame) {
-        historyReady = true;
-        enableDrawing();
-      }
-    }, fail, { onlyOnce: true });
+
+    function startHistory() {
+      db.onChildAdded(log, s => handle("add", s), fail);
+      db.onChildChanged(log, s => handle("change", s), fail);
+      db.onChildRemoved(log, s => handle("remove", s), fail);
+      db.onValue(log, snapshot => {
+        for (const id of previewIds) {
+          if (!snapshot.hasChild(id)) remove(id);
+        }
+        previewIds.clear();
+        initialReceived = true;
+        if (!queueFrame) completeHistory();
+      }, fail, { onlyOnce: true });
+    }
+
+    // Load a small window first, but never let it hold up the full board.
+    let historyStarted = false;
+    function startHistoryOnce() {
+      if (historyStarted) return;
+      historyStarted = true;
+      clearTimeout(previewDeadline);
+      startHistory();
+    }
+    const previewDeadline = setTimeout(startHistoryOnce, 1200);
+    db.get(db.query(log, db.limitToLast(200))).then(snapshot => {
+      if (initialReceived || denied) return;
+      snapshot.forEach(child => {
+        if (!actions.has(child.key)) {
+          previewIds.add(child.key);
+          receive(child.key, child.val());
+        }
+      });
+      previewReady = true;
+      enableDrawing();
+    }).catch(() => {}).finally(startHistoryOnce);
 
     function enableDrawing() {
-      if (ready || denied || !guestReady || !historyReady) return;
-      loading = false;
-      ready = true;
-      writeAction = (action, image) => {
-        const item = db.push(log);
-        receive(item.key, action, image);
-        const owner = auth.currentUser?.uid;
-        db.set(item, owner ? { ...action, owner } : action).then(() => { writeError = false; report(); }).catch(() => {
-          remove(item.key);
-          writeError = true;
-          report();
-        });
-        return item.key;
-      };
-      deleteActions = ids => db.update(log, Object.fromEntries(ids.map(id => [id, null])));
+      if (denied) return;
+      if (historyReady && guestReady) loading = false;
+      if (!writeAction && guestReady && (previewReady || historyReady)) {
+        writeAction = (action, image) => {
+          const item = db.push(log);
+          receive(item.key, action, image);
+          const owner = auth.currentUser?.uid;
+          db.set(item, owner ? { ...action, owner } : action).then(() => { writeError = false; report(); }).catch(() => {
+            remove(item.key);
+            writeError = true;
+            report();
+          });
+          return item.key;
+        };
+        deleteActions = ids => db.update(log, Object.fromEntries(ids.map(id => [id, null])));
+      }
       report();
     }
 
@@ -1598,7 +1641,8 @@ board.onpointerdown = e => {
   if (rightMouse || tool === "hand" || (space && e.pointerType !== "touch")) {
     pan = { id: e.pointerId, point };
     cursor();
-  } else if ((loading && !animationMode) || currentLayers().hidden.has(currentLayers().selected)) {
+  } else if (currentLayers().hidden.has(currentLayers().selected) ||
+    (loading && !animationMode && (!writeAction || !["brush", "eraser"].includes(tool)))) {
     return;
   } else if (tool === "fill" || tool === "pick") {
     finishCamera();
