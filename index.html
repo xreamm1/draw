@@ -1,17 +1,26 @@
 <!doctype html>
-<!-- Firebase Console → Realtime Database → Rules → Publish (public testing only).
-{"rules":{"whiteboard":{"actions":{".read":true,".write":true}}}}
-Anyone can read, change or delete this board while these rules are active.
--->
-<html lang="en">
+<!-- Для общей доски включите анонимный вход в Firebase Authentication и разрешите чтение /whiteboard/actions. Запись ограничивается владельцем действия через правила Realtime Database. -->
+<html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shared Whiteboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Общая доска</title>
 <style>
   * { box-sizing: border-box }
   body { margin: 0; background: white; color: #182230; font: 14px system-ui, sans-serif }
-  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; -webkit-touch-callout: none; cursor: crosshair }
+  #reference { position: fixed; top: 0; left: 0; max-width: none; transform-origin: 0 0;
+    opacity: .32; pointer-events: none; user-select: none }
+  dialog { max-width: min(420px, calc(100% - 24px)); border: 1px solid #d9e0e8;
+    border-radius: 12px; color: inherit; padding: 16px }
+  dialog::backdrop { background: #18223055 }
+  dialog h2 { margin: 0 0 12px; font-size: 18px }
+  dialog form, #admin-tools { display: grid; gap: 10px }
+  dialog [hidden] { display: none !important }
+  dialog label { display: grid; padding: 0 }
+  dialog input { width: 100%; font: inherit; min-height: 36px; padding-inline: 8px }
+  #admin-message { min-height: 1.4em; margin: 8px 0 }
+  #status { pointer-events: auto; touch-action: manipulation; min-height: 32px; background: #fff; border: 1px solid #d9e0e8 }
   canvas.pan { cursor: grab }
   canvas.drag { cursor: grabbing }
   header { position: fixed; top: 12px; left: 12px; right: 12px; pointer-events: none }
@@ -26,26 +35,61 @@ Anyone can read, change or delete this board while these rules are active.
   input[type="color"] { width: 35px; height: 34px }
   footer { position: fixed; bottom: 12px; left: 12px; right: 12px; pointer-events: none;
     display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px }
-  footer span { background: #fff; border: 1px solid #d9e0e8; border-radius: 8px; padding: 6px 9px }
+  footer > span { background: #fff; border: 1px solid #d9e0e8; border-radius: 8px; padding: 6px 9px }
+  header, footer { left: max(12px, env(safe-area-inset-left)); right: max(12px, env(safe-area-inset-right)) }
+  header { top: max(12px, env(safe-area-inset-top)) }
+  footer { bottom: max(12px, env(safe-area-inset-bottom)) }
+  button:disabled { opacity: .5; cursor: default }
+  .touch-help { display: none }
+  @media (pointer: coarse) {
+    button, input[type="color"], input[type="range"] { min-height: 44px }
+    .mouse-help { display: none }
+    .touch-help { display: inline }
+  }
+  @media (max-width: 480px) {
+    nav { gap: 4px; padding: 6px }
+    button { padding-inline: 7px }
+    footer { font-size: 12px }
+  }
 </style>
 </head>
 <body>
-<canvas id="board" aria-label="Shared drawing canvas"></canvas>
+<canvas id="board" aria-label="Холст общей доски"></canvas>
+<img id="reference" alt="" hidden>
 <header>
-  <nav aria-label="Drawing tools">
-    <button data-tool="brush" aria-pressed="true">Brush</button>
-    <button data-tool="eraser" aria-pressed="false">Eraser</button>
-    <button data-tool="pick" aria-pressed="false">Eyedropper</button>
-    <button data-tool="fill" aria-pressed="false">Fill</button>
-    <button data-tool="blur" aria-pressed="false">Blur</button>
-    <label>Color <input id="color" type="color" value="#194c9e"></label>
-    <label>Size <input id="size" type="range" min="1" max="80" value="8"></label>
+  <nav aria-label="Инструменты рисования">
+    <button data-tool="brush" aria-pressed="true">Кисть</button>
+    <button data-tool="eraser" aria-pressed="false">Ластик</button>
+    <button data-tool="pick" aria-pressed="false">Пипетка</button>
+    <button data-tool="fill" aria-pressed="false">Заливка</button>
+    <button data-tool="blur" aria-pressed="false">Размытие</button>
+    <button data-tool="hand" aria-pressed="false">Рука</button>
+    <button id="undo" title="Ctrl+Z / ⌘Z" disabled>Отменить</button>
+    <label>Цвет <input id="color" type="color" value="#194c9e"></label>
+    <label>Размер <input id="size" type="range" min="1" max="80" value="8"></label>
   </nav>
 </header>
 <footer>
-  <span id="status" role="status">Starting…</span>
-  <span>Space + drag or two fingers · Scroll or pinch to zoom</span>
+  <button id="status" type="button" aria-live="polite">Подключение…</button>
+  <span><span class="mouse-help">ПКМ или пробел + перетаскивание · Колесо для масштаба</span><span class="touch-help">Один палец рисует · Два пальца перемещают и меняют масштаб</span></span>
 </footer>
+<dialog id="panel" aria-labelledby="panel-title">
+  <h2 id="panel-title">Управление доской</h2>
+  <form id="admin-login">
+    <label>Почта <input name="email" type="email" autocomplete="username" required></label>
+    <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+    <button>Войти</button>
+  </form>
+  <div id="admin-tools" hidden>
+    <button id="scheme">Схема</button>
+    <input id="scheme-file" type="file" accept="image/*" hidden>
+    <button id="scheme-remove" disabled>Удалить схему</button>
+    <button id="clear-board">Удалить всё с общей доски</button>
+    <button id="sign-out">Выйти</button>
+  </div>
+  <p id="admin-message" role="status"></p>
+  <form method="dialog"><button>Закрыть</button></form>
+</dialog>
 <script type="module">
 const firebaseConfig = {
   apiKey: "AIzaSyCW1He4AAsxS07cYvlqHLD9TVF2t47UQ-I",
@@ -58,17 +102,85 @@ const firebaseConfig = {
 };
 
 const board = document.querySelector("#board");
-const ctx = board.getContext("2d", { alpha: false, willReadFrequently: true });
+const ctx = board.getContext("2d", { alpha: false });
 const color = document.querySelector("#color");
 const size = document.querySelector("#size");
 const status = document.querySelector("#status");
 const buttons = document.querySelectorAll("[data-tool]");
+const undoButton = document.querySelector("#undo");
+const undoHistory = [];
+let undoing = false;
 const camera = { x: 0, y: 0, zoom: 1 };
 const actions = new Map();
-const rasterLimit = 1200;
+const coarse = matchMedia("(pointer: coarse)");
+const panel = document.querySelector("#panel");
+const login = document.querySelector("#admin-login");
+const adminTools = document.querySelector("#admin-tools");
+const adminMessage = document.querySelector("#admin-message");
+const clearBoard = document.querySelector("#clear-board");
+const schemeFile = document.querySelector("#scheme-file");
+const schemeRemove = document.querySelector("#scheme-remove");
+const reference = document.querySelector("#reference");
+let scheme = null;
+let adminAvailable = false;
+let taps = 0, lastTap = 0;
+let streamTimer = 0, lastStream = -Infinity;
+status.onclick = () => {
+  const now = performance.now();
+  taps = now - lastTap < 650 ? taps + 1 : 1;
+  lastTap = now;
+  if (taps !== 7) return;
+  taps = 0;
+  if (!adminAvailable) adminMessage.textContent = "Вход пока недоступен";
+  if (!panel.open) panel.showModal();
+};
+document.querySelector("#scheme").onclick = () => schemeFile.click();
+schemeRemove.onclick = () => {
+  if (!scheme) return;
+  URL.revokeObjectURL(scheme.url);
+  scheme = null;
+  reference.hidden = true;
+  reference.removeAttribute("src");
+  schemeRemove.disabled = true;
+};
+schemeFile.onchange = async () => {
+  const file = schemeFile.files[0];
+  schemeFile.value = "";
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  image.src = url;
+  try {
+    await image.decode();
+    if (scheme) URL.revokeObjectURL(scheme.url);
+    const scale = Math.min(board.clientWidth * .85 / image.naturalWidth,
+      board.clientHeight * .8 / image.naturalHeight, 1);
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale;
+    const [x, y] = world([(board.clientWidth - width) / 2, (board.clientHeight - height) / 2]);
+    scheme = { url, x, y, w: width / camera.zoom, h: height / camera.zoom };
+    reference.src = url;
+    reference.hidden = false;
+    schemeRemove.disabled = false;
+    positionScheme();
+    adminMessage.textContent = "";
+  } catch {
+    URL.revokeObjectURL(url);
+    adminMessage.textContent = "Не удалось открыть изображение";
+  }
+};
+
+function positionScheme() {
+  if (!scheme) return;
+  const { x, y, w, h } = scheme;
+  reference.style.width = w + "px";
+  reference.style.height = h + "px";
+  reference.style.transform = "translate(" + (x * camera.zoom + camera.x) + "px,"
+    + (y * camera.zoom + camera.y) + "px) scale(" + camera.zoom + ")";
+}
 let tool = "brush", space = false, pan = null, stroke = null;
-let ordered = [], painted = 0, dirty = true, frame = 0, localId = 0;
-let writeAction = null, loading = Boolean(firebaseConfig.databaseURL);
+let ordered = [], painted = 0, dirty = true, rebuildOrder = false, frame = 0, localId = 0;
+let writeAction = null, deleteActions = null, loading = Boolean(firebaseConfig.databaseURL);
 const touches = new Map();
 let gesture = null, touchNavigation = false;
 
@@ -76,8 +188,10 @@ for (const button of buttons) button.onclick = event => {
   select(button.dataset.tool);
   if (event.detail) button.blur();
 };
+undoButton.onclick = undo;
 function select(next) {
   tool = next;
+  cursor();
   for (const button of buttons) {
     button.setAttribute("aria-pressed", String(button.dataset.tool === tool));
   }
@@ -95,12 +209,13 @@ function world([x, y]) { return [(x - camera.x) / camera.zoom, (y - camera.y) / 
 function pixel([x, y]) { return [x * board.width / board.clientWidth, y * board.height / board.clientHeight]; }
 
 function resize() {
-  const ratio = Math.min(devicePixelRatio || 1, 2560 / Math.max(board.clientWidth, board.clientHeight));
+  const ratio = Math.min(devicePixelRatio || 1, coarse.matches ? 1.25 : 2,
+    (coarse.matches ? 1600 : 2560) / Math.max(board.clientWidth, board.clientHeight));
   board.width = Math.max(1, Math.round(board.clientWidth * ratio));
   board.height = Math.max(1, Math.round(board.clientHeight * ratio));
   redraw();
 }
-function redraw() { dirty = true; schedule(); }
+function redraw() { dirty = true; positionScheme(); schedule(); }
 function schedule() {
   if (!frame) frame = requestAnimationFrame(() => {
     frame = 0;
@@ -126,6 +241,10 @@ function path(context, points, width, paint) {
 }
 
 function render() {
+  if (rebuildOrder) {
+    ordered = [...actions.keys()].sort();
+    rebuildOrder = false;
+  }
   const sx = board.width / board.clientWidth, sy = board.height / board.clientHeight;
   if (dirty) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -135,8 +254,15 @@ function render() {
     dirty = false;
   }
   ctx.setTransform(sx * camera.zoom, 0, 0, sy * camera.zoom, sx * camera.x, sy * camera.y);
+  const [left, top] = world([0, 0]);
+  const [right, bottom] = world([board.clientWidth, board.clientHeight]);
   while (painted < ordered.length) {
     const entry = actions.get(ordered[painted]);
+    const [x, y, r, b] = entry.bounds;
+    if (r < left || b < top || x > right || y > bottom) {
+      painted++;
+      continue;
+    }
     if (entry.waiting) return false;
     const action = entry.action;
     if (entry.image) ctx.drawImage(entry.image, action.x, action.y, action.w, action.h);
@@ -165,18 +291,26 @@ function receive(id, action, image) {
     if (existed) remove(id);
     return;
   }
-  const entry = { action, image, waiting: Boolean(action.png && !image) };
-  actions.set(id, entry);
-  if (!existed && (!ordered.length || id > ordered[ordered.length - 1])) ordered.push(id);
+  let bounds;
+  if (action.png) bounds = [action.x, action.y, action.x + action.w, action.y + action.h];
   else {
-    if (!existed) { ordered.push(id); ordered.sort(); }
+    const xs = action.points.map(p => p[0]), ys = action.points.map(p => p[1]);
+    const radius = action.width / 2;
+    bounds = [Math.min(...xs) - radius, Math.min(...ys) - radius,
+      Math.max(...xs) + radius, Math.max(...ys) + radius];
+  }
+  const entry = { action, image, bounds, waiting: Boolean(action.png && !image) };
+  actions.set(id, entry);
+  if (!rebuildOrder && !existed && (!ordered.length || id > ordered[ordered.length - 1])) ordered.push(id);
+  else {
+    if (!existed) rebuildOrder = true;
     dirty = true;
   }
   if (entry.waiting) {
     const decoded = new Image();
     decoded.src = action.png;
     decoded.decode().then(() => { entry.image = decoded; }).catch(() => {
-      status.textContent = "A saved raster action could not be decoded";
+      status.textContent = "Не удалось загрузить сохранённую заливку или размытие";
     }).finally(() => { entry.waiting = false; schedule(); });
   }
   schedule();
@@ -184,28 +318,72 @@ function receive(id, action, image) {
 
 function remove(id) {
   if (!actions.delete(id)) return;
-  ordered = ordered.filter(key => key !== id);
+  rebuildOrder = true;
   redraw();
 }
 
-function publish(action, image) {
-  if (writeAction) writeAction(action, image);
-  else receive("~" + String(++localId).padStart(12, "0"), action, image);
+function remember(ids) {
+  if (ids.length) undoHistory.push(ids);
+  undoButton.disabled = undoing || !undoHistory.length;
+}
+
+function publish(action, image, group) {
+  let id;
+  if (writeAction) id = writeAction(action, image);
+  else {
+    id = "~" + String(++localId).padStart(12, "0");
+    receive(id, action, image);
+  }
+  if (group) group.push(id);
+  else remember([id]);
+}
+
+async function undo() {
+  if (undoing) return;
+  if (stroke) endStroke(Boolean(stroke.last || stroke.pending.length) && !stroke.tap);
+  let ids = [];
+  while (!ids.length && undoHistory.length) {
+    ids = undoHistory.pop().filter(id => actions.has(id));
+  }
+  if (!ids.length) {
+    remember([]);
+    return;
+  }
+  const undoIndex = undoHistory.length;
+  undoing = true;
+  remember([]);
+  try {
+    const shared = ids.filter(id => !id.startsWith("~"));
+    if (shared.length) await deleteActions(shared);
+    for (const id of ids) if (id.startsWith("~")) remove(id);
+  } catch {
+    undoHistory.splice(undoIndex, 0, ids);
+    status.textContent = "Не удалось отменить изменение";
+  } finally {
+    undoing = false;
+    remember([]);
+  }
 }
 
 async function connect() {
-  if (!firebaseConfig.databaseURL) { status.textContent = "Local · Add databaseURL"; return; }
+  if (!firebaseConfig.databaseURL) { status.textContent = "Локальная доска · Укажи databaseURL"; return; }
   try {
-    const [{ initializeApp }, db] = await Promise.all([
+    const [{ initializeApp }, db, authSdk] = await Promise.all([
       import("https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js"),
-      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-database.js")
+      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-database.js"),
+      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js")
     ]);
-    const database = db.getDatabase(initializeApp(firebaseConfig));
+    const app = initializeApp(firebaseConfig);
+    const database = db.getDatabase(app);
+    const auth = authSdk.getAuth(app);
+    await auth.authStateReady();
+    if (!auth.currentUser) await authSdk.signInAnonymously(auth).catch(() => {});
+    configurePanel(authSdk, auth, db, database);
     const log = db.ref(database, "whiteboard/actions");
     let ready = false, online = false, denied = false, writeError = false;
     const report = () => {
-      status.textContent = denied ? "Local · Database read denied" : writeError ? "Database write failed"
-        : !ready ? "Loading shared board…" : online ? "Shared · Online" : "Offline · Writes queued";
+      status.textContent = denied ? "Локальная доска · Доступ к базе закрыт" : writeError ? "Не удалось сохранить изменение"
+        : !ready ? "Загрузка общей доски…" : online ? "Общая доска · В сети" : "Нет связи · Изменения в очереди";
     };
     const fail = () => { loading = false; denied = true; writeAction = null; report(); };
     db.onValue(db.ref(database, ".info/connected"), s => { online = s.val(); report(); });
@@ -218,27 +396,90 @@ async function connect() {
       writeAction = (action, image) => {
         const item = db.push(log);
         receive(item.key, action, image);
-        db.set(item, action).then(() => { writeError = false; report(); }).catch(() => {
+        const owner = auth.currentUser?.uid;
+        db.set(item, owner ? { ...action, owner } : action).then(() => { writeError = false; report(); }).catch(() => {
           remove(item.key);
           writeError = true;
           report();
         });
+        return item.key;
       };
+      deleteActions = ids => db.update(log, Object.fromEntries(ids.map(id => [id, null])));
       report();
     }, fail, { onlyOnce: true });
   } catch {
     loading = false;
-    status.textContent = "Local · Firebase could not start";
+    status.textContent = "Локальная доска · Firebase недоступен";
   }
 }
 
-function rasterAction(canvas, left, top, width, height) {
+function configurePanel(authSdk, auth, db, database) {
+  const admin = db.ref(database, "adminUid");
+  let adminUid = null;
+  let accountVersion = 0;
+  adminAvailable = true;
+  adminMessage.textContent = "";
+  authSdk.onAuthStateChanged(auth, async user => {
+    const version = ++accountVersion;
+    adminUid = null;
+    login.hidden = false;
+    adminTools.hidden = true;
+    if (!user || user.isAnonymous) return;
+    const permitted = await db.get(admin).then(() => true).catch(() => false);
+    if (version !== accountVersion) return;
+    if (permitted) {
+      adminUid = user.uid;
+      login.hidden = true;
+      adminTools.hidden = false;
+      adminMessage.textContent = "";
+    } else adminMessage.textContent = "У этой учётной записи нет доступа";
+  });
+  login.onsubmit = async event => {
+    event.preventDefault();
+    const fields = new FormData(login);
+    const submit = login.querySelector("button");
+    submit.disabled = true;
+    adminMessage.textContent = "Вход…";
+    try {
+      await authSdk.signInWithEmailAndPassword(auth, fields.get("email"), fields.get("password"));
+    } catch {
+      adminMessage.textContent = "Не удалось войти. Проверь почту и пароль";
+    } finally {
+      login.elements.password.value = "";
+      submit.disabled = false;
+    }
+  };
+  document.querySelector("#sign-out").onclick = async () => {
+    try {
+      await authSdk.signOut(auth);
+      await authSdk.signInAnonymously(auth);
+      adminMessage.textContent = "";
+    } catch {
+      adminMessage.textContent = "Не удалось восстановить гостевой вход";
+    }
+  };
+  clearBoard.onclick = async () => {
+    if (!adminUid || auth.currentUser?.uid !== adminUid) return;
+    if (!confirm("Удалить все рисунки с общей доски для всех участников?")) return;
+    clearBoard.disabled = true;
+    try {
+      await db.remove(db.ref(database, "whiteboard/actions"));
+      adminMessage.textContent = "Общая доска очищена";
+    } catch {
+      adminMessage.textContent = "Не удалось очистить доску. Проверь правила Firebase";
+    } finally {
+      clearBoard.disabled = false;
+    }
+  };
+}
+
+function rasterAction(canvas, left, top, width, height, group) {
   const [x, y] = world([left, top]);
-  publish({ x, y, w: width / camera.zoom, h: height / camera.zoom, png: canvas.toDataURL() }, canvas);
+  publish({ x, y, w: width / camera.zoom, h: height / camera.zoom, png: canvas.toDataURL() }, canvas, group);
 }
 
 function sample(left, top, width, height) {
-  const scale = Math.min(1, rasterLimit / Math.max(width, height));
+  const scale = Math.min(1, (coarse.matches ? 850 : 1200) / Math.max(width, height));
   const image = surface(Math.max(1, Math.ceil(width * scale)), Math.max(1, Math.ceil(height * scale)));
   const context = image.getContext("2d", { willReadFrequently: true });
   const [sx, sy] = pixel([left, top]);
@@ -280,7 +521,7 @@ function fill([x, y]) {
   rasterAction(image, 0, 0, width, height);
 }
 
-function blur(points, width) {
+function blur(points, width, group) {
   if (!render()) return;
   const view = points.map(([x, y]) => [x * camera.zoom + camera.x, y * camera.zoom + camera.y]);
   const diameter = width * camera.zoom;
@@ -310,7 +551,7 @@ function blur(points, width) {
   path(m, view.map(([x, y]) => [(x - left) * scale, (y - top) * sy]), diameter * scale, "black");
   out.globalCompositeOperation = "destination-in";
   out.drawImage(mask, 0, 0);
-  rasterAction(image, left, top, w, h);
+  rasterAction(image, left, top, w, h, group);
 }
 
 function activate(point) {
@@ -324,14 +565,23 @@ function activate(point) {
   }
 }
 
-function flushStroke() {
+function flushStroke(force = false) {
   if (!stroke?.pending.length) return;
+  if (!force && coarse.matches && stroke.tool !== "blur") {
+    const remaining = 32 - (performance.now() - lastStream);
+    if (remaining > 0) {
+      if (!streamTimer) streamTimer = setTimeout(() => { streamTimer = 0; schedule(); }, remaining);
+      return;
+    }
+  }
+  if (streamTimer) { clearTimeout(streamTimer); streamTimer = 0; }
+  lastStream = performance.now();
   while (stroke.pending.length) {
     const points = stroke.pending.splice(0, 127);
     if (stroke.last) points.unshift(stroke.last);
     stroke.last = points[points.length - 1];
-    if (stroke.tool === "blur") blur(points, stroke.width);
-    else publish({ points, width: stroke.width, color: stroke.color });
+    if (stroke.tool === "blur") blur(points, stroke.width, stroke.ids);
+    else publish({ points, width: stroke.width, color: stroke.color }, null, stroke.ids);
   }
 }
 function endStroke(commit = true) {
@@ -339,8 +589,9 @@ function endStroke(commit = true) {
   if (commit && stroke.tap) activate(stroke.tap);
   if (commit && !stroke.tap) {
     if (!stroke.last && !stroke.pending.length) stroke.pending.push(stroke.start);
-    flushStroke();
+    flushStroke(true);
   }
+  if (stroke.ids) remember(stroke.ids);
   stroke = null;
 }
 
@@ -356,12 +607,14 @@ function touchPair() {
   return { center: [(x + u) / 2, (y + v) / 2], distance: Math.max(1, Math.hypot(u - x, v - y)) };
 }
 function cursor() {
-  board.classList.toggle("pan", space);
+  board.classList.toggle("pan", space || tool === "hand");
   board.classList.toggle("drag", Boolean(pan || gesture));
 }
 
+board.oncontextmenu = e => e.preventDefault();
 board.onpointerdown = e => {
-  if (e.button !== 0) return;
+  const rightMouse = e.pointerType === "mouse" && e.button === 2;
+  if (e.button !== 0 && !rightMouse) return;
   const point = screen(e);
   board.setPointerCapture(e.pointerId);
   if (e.pointerType === "touch") {
@@ -369,6 +622,7 @@ board.onpointerdown = e => {
     if (touches.size >= 2) {
       if (stroke?.last) endStroke();
       else endStroke(false);
+      pan = null;
       touchNavigation = true;
       gesture = touchPair();
       cursor();
@@ -376,7 +630,7 @@ board.onpointerdown = e => {
     if (touchNavigation) return;
   }
   if (stroke || pan) return;
-  if (space && e.pointerType !== "touch") {
+  if (rightMouse || tool === "hand" || (space && e.pointerType !== "touch")) {
     pan = { id: e.pointerId, point };
     cursor();
   } else if (loading) {
@@ -385,7 +639,7 @@ board.onpointerdown = e => {
     if (e.pointerType === "touch") stroke = { id: e.pointerId, tap: point, pending: [] };
     else activate(point);
   } else {
-    stroke = { id: e.pointerId, tool, width: Number(size.value), pending: [], start: world(point),
+    stroke = { id: e.pointerId, tool, width: Number(size.value), pending: [], ids: [], start: world(point), screenStart: point,
       color: tool === "eraser" ? "#ffffff" : color.value };
     if (e.pointerType !== "touch") { stroke.pending.push(stroke.start); schedule(); }
   }
@@ -408,7 +662,14 @@ board.onpointermove = e => {
     camera.y += point[1] - pan.point[1];
     pan.point = point;
     redraw();
-  } else if (stroke?.id === e.pointerId && !stroke.tap) {
+  } else if (stroke?.id === e.pointerId) {
+    const start = stroke.tap || stroke.screenStart;
+    const moved = Math.hypot(point[0] - start[0], point[1] - start[1]) >= 5;
+    if (stroke.tap) {
+      if (moved) endStroke(false);
+      return;
+    }
+    if (e.pointerType === "touch" && !stroke.last && !stroke.pending.length && !moved) return;
     if (!stroke.last && !stroke.pending.length) stroke.pending.push(stroke.start);
     const events = e.getCoalescedEvents?.();
     for (const sample of events?.length ? events : [e]) stroke.pending.push(world(screen(sample)));
@@ -432,7 +693,8 @@ function release(e) {
   }
   cursor();
 }
-board.onpointerup = board.onpointercancel = board.onlostpointercapture = release;
+addEventListener("pointerup", release);
+addEventListener("pointercancel", release);
 board.addEventListener("wheel", e => {
   e.preventDefault();
   const point = screen(e);
@@ -440,13 +702,26 @@ board.addEventListener("wheel", e => {
   zoom(point, point, Math.exp(-e.deltaY * units * 0.0015));
 }, { passive: false });
 addEventListener("keydown", e => {
-  if (e.code !== "Space" || e.target.closest?.("button, input, textarea, [contenteditable]")) return;
+  if (e.target.closest?.("textarea, [contenteditable]")) return;
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyZ") {
+    e.preventDefault();
+    if (!e.repeat) undo();
+    return;
+  }
+  if (e.code !== "Space" || e.target.closest?.("button, input")) return;
   e.preventDefault();
   space = true;
   cursor();
 });
 addEventListener("keyup", e => { if (e.code === "Space") { space = false; cursor(); } });
-addEventListener("blur", () => { space = false; cursor(); });
+addEventListener("blur", () => {
+  endStroke(Boolean(stroke?.last));
+  space = false;
+  pan = gesture = null;
+  touches.clear();
+  touchNavigation = false;
+  cursor();
+});
 addEventListener("resize", resize);
 resize();
 connect();
