@@ -9,6 +9,7 @@
   * { box-sizing: border-box }
   body { margin: 0; background: white; color: #182230; font: 14px system-ui, sans-serif }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; -webkit-touch-callout: none; cursor: crosshair }
+  #camera-preview { pointer-events: none; transform-origin: 0 0; will-change: transform }
   #reference { position: fixed; top: 0; left: 0; max-width: none; transform-origin: 0 0;
     opacity: .32; pointer-events: none; user-select: none }
   #scheme-playback:not([hidden]) { position: fixed; right: max(12px, env(safe-area-inset-right));
@@ -79,6 +80,7 @@
 </head>
 <body>
 <canvas id="board" aria-label="Холст общей доски"></canvas>
+<canvas id="camera-preview" aria-hidden="true" hidden></canvas>
 <img id="reference" alt="" hidden>
 <div id="scheme-playback" role="group" aria-label="Видео схемы" hidden>
   <button id="scheme-play" type="button">Пуск</button>
@@ -481,7 +483,68 @@ function rectangleBounds(x, y, w, h, angle) {
 }
 function pixel([x, y]) { return [x * board.width / board.clientWidth, y * board.height / board.clientHeight]; }
 
+const cameraPreview = document.querySelector("#camera-preview");
+let previewView = null, cameraIdle = 0, previewRefresh = 0;
+
+function captureCameraPreview() {
+  if (cameraPreview.width !== board.width) cameraPreview.width = board.width;
+  if (cameraPreview.height !== board.height) cameraPreview.height = board.height;
+  const previewContext = cameraPreview.getContext("2d", { alpha: false });
+  previewContext.drawImage(board, 0, 0);
+  previewView = { x: camera.x, y: camera.y, zoom: camera.zoom, angle: camera.angle };
+}
+
+function moveCamera() {
+  if (stroke && !stroke.tap) { redraw(); return; }
+  if (!previewView) {
+    const previous = renderedView;
+    if (!previous) { redraw(); return; }
+    captureCameraPreview();
+    previewView = previous;
+    board.style.opacity = "0";
+    cameraPreview.hidden = false;
+  }
+  dirty = true;
+  authorTip.hidden = true;
+  clearTimeout(cameraIdle);
+  cameraIdle = setTimeout(finishCamera, 110);
+  if (!previewRefresh) previewRefresh = setTimeout(refreshCameraPreview, 260);
+  schedule();
+}
+
+function refreshCameraPreview() {
+  previewRefresh = 0;
+  if (!previewView) return;
+  render();
+  captureCameraPreview();
+  cameraPreview.style.transform = "none";
+}
+
+function finishCamera() {
+  if (!previewView) return;
+  clearTimeout(cameraIdle);
+  clearTimeout(previewRefresh);
+  cameraIdle = previewRefresh = 0;
+  previewView = null;
+  cameraPreview.hidden = true;
+  board.style.opacity = "";
+  schedule();
+}
+
+function updateCameraPreview() {
+  const scale = camera.zoom / previewView.zoom;
+  const angle = camera.angle - previewView.angle;
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  const x = camera.x - scale * (previewView.x * cos - previewView.y * sin);
+  const y = camera.y - scale * (previewView.x * sin + previewView.y * cos);
+  cameraPreview.style.transform = `translate(${x}px,${y}px) rotate(${angle}rad) scale(${scale})`;
+  positionScheme();
+  positionCursors();
+}
+
 function resize() {
+  finishCamera();
+  renderedView = null;
   const ratio = Math.min(devicePixelRatio || 1, coarse.matches ? 1.25 : 2,
     (coarse.matches ? 1600 : 2560) / Math.max(board.clientWidth, board.clientHeight));
   board.width = Math.max(1, Math.round(board.clientWidth * ratio));
@@ -492,6 +555,10 @@ function redraw() { dirty = true; authorTip.hidden = true; positionScheme(); pos
 function schedule() {
   if (!frame) frame = requestAnimationFrame(() => {
     frame = 0;
+    if (previewView) {
+      updateCameraPreview();
+      return;
+    }
     flushStroke();
     render();
   });
@@ -513,6 +580,7 @@ function path(context, points, width, paint) {
   context.stroke();
 }
 
+let renderedView = null;
 function render() {
   if (rebuildOrder) {
     ordered = [...actions.keys()].sort();
@@ -525,6 +593,7 @@ function render() {
     ctx.fillRect(0, 0, board.width, board.height);
     painted = 0;
     dirty = false;
+    renderedView = { x: camera.x, y: camera.y, zoom: camera.zoom, angle: camera.angle };
   }
   const { zoom, cos, sin } = camera;
   ctx.setTransform(sx * zoom * cos, sy * zoom * sin, -sx * zoom * sin, sy * zoom * cos,
@@ -993,7 +1062,7 @@ function transformView(from, to, factor, turn = 0) {
   camera.x += to[0] - x;
   camera.y += to[1] - y;
   resetAngle.disabled = camera.angle === 0;
-  redraw();
+  moveCamera();
 }
 function touchPair() {
   const [[x, y], [u, v]] = [...touches.values()];
@@ -1034,9 +1103,11 @@ board.onpointerdown = e => {
   } else if (loading) {
     return;
   } else if (tool === "fill" || tool === "pick") {
+    finishCamera();
     if (e.pointerType === "touch") stroke = { id: e.pointerId, tap: point, pending: [] };
     else activate(point);
   } else {
+    finishCamera();
     stroke = { id: e.pointerId, tool, width: Number(size.value), pending: [], ids: [], start: world(point), screenStart: point,
       color: tool === "eraser" ? "#ffffff" : color.value, opacity: Number(opacity.value) / 100 };
     if (e.pointerType !== "touch") { stroke.pending.push(stroke.start); schedule(); }
@@ -1064,7 +1135,7 @@ board.onpointermove = e => {
     camera.x += point[0] - pan.point[0];
     camera.y += point[1] - pan.point[1];
     pan.point = point;
-    redraw();
+    moveCamera();
   } else if (stroke?.id === e.pointerId) {
     const start = stroke.tap || stroke.screenStart;
     const moved = Math.hypot(point[0] - start[0], point[1] - start[1]) >= 5;
