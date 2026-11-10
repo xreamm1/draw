@@ -1,0 +1,456 @@
+<!doctype html>
+<!-- Firebase Console → Realtime Database → Rules → Publish (public testing only).
+{"rules":{"whiteboard":{"actions":{".read":true,".write":true}}}}
+Anyone can read, change or delete this board while these rules are active.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared Whiteboard</title>
+<style>
+  * { box-sizing: border-box }
+  body { margin: 0; background: white; color: #182230; font: 14px system-ui, sans-serif }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair }
+  canvas.pan { cursor: grab }
+  canvas.drag { cursor: grabbing }
+  header { position: fixed; top: 12px; left: 12px; right: 12px; pointer-events: none }
+  nav { width: fit-content; max-width: 100%; display: flex; flex-wrap: wrap; align-items: center;
+    gap: 6px; padding: 8px; background: #fff; border: 1px solid #d9e0e8;
+    border-radius: 12px; box-shadow: 0 4px 18px #18223018; pointer-events: auto }
+  button { font: inherit; color: inherit; background: #f3f5f8; border: 1px solid transparent;
+    border-radius: 7px; min-height: 36px; padding: 4px 9px; cursor: pointer }
+  button[aria-pressed="true"] { color: #fff; background: #194c9e }
+  label { display: flex; align-items: center; gap: 5px; padding: 0 4px }
+  input[type="range"] { width: 75px }
+  input[type="color"] { width: 35px; height: 34px }
+  footer { position: fixed; bottom: 12px; left: 12px; right: 12px; pointer-events: none;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px }
+  footer span { background: #fff; border: 1px solid #d9e0e8; border-radius: 8px; padding: 6px 9px }
+</style>
+</head>
+<body>
+<canvas id="board" aria-label="Shared drawing canvas"></canvas>
+<header>
+  <nav aria-label="Drawing tools">
+    <button data-tool="brush" aria-pressed="true">Brush</button>
+    <button data-tool="eraser" aria-pressed="false">Eraser</button>
+    <button data-tool="pick" aria-pressed="false">Eyedropper</button>
+    <button data-tool="fill" aria-pressed="false">Fill</button>
+    <button data-tool="blur" aria-pressed="false">Blur</button>
+    <label>Color <input id="color" type="color" value="#194c9e"></label>
+    <label>Size <input id="size" type="range" min="1" max="80" value="8"></label>
+  </nav>
+</header>
+<footer>
+  <span id="status" role="status">Starting…</span>
+  <span>Space + drag or two fingers · Scroll or pinch to zoom</span>
+</footer>
+<script type="module">
+const firebaseConfig = {
+  apiKey: "AIzaSyCW1He4AAsxS07cYvlqHLD9TVF2t47UQ-I",
+  authDomain: "draw-ccfc3.firebaseapp.com",
+  projectId: "draw-ccfc3",
+  storageBucket: "draw-ccfc3.firebasestorage.app",
+  messagingSenderId: "1016096611827",
+  appId: "1:1016096611827:web:d66c427fdcc36236d94686",
+  databaseURL: "https://draw-ccfc3-default-rtdb.europe-west1.firebasedatabase.app"
+};
+
+const board = document.querySelector("#board");
+const ctx = board.getContext("2d", { alpha: false, willReadFrequently: true });
+const color = document.querySelector("#color");
+const size = document.querySelector("#size");
+const status = document.querySelector("#status");
+const buttons = document.querySelectorAll("[data-tool]");
+const camera = { x: 0, y: 0, zoom: 1 };
+const actions = new Map();
+const rasterLimit = 1200;
+let tool = "brush", space = false, pan = null, stroke = null;
+let ordered = [], painted = 0, dirty = true, frame = 0, localId = 0;
+let writeAction = null, loading = Boolean(firebaseConfig.databaseURL);
+const touches = new Map();
+let gesture = null, touchNavigation = false;
+
+for (const button of buttons) button.onclick = event => {
+  select(button.dataset.tool);
+  if (event.detail) button.blur();
+};
+function select(next) {
+  tool = next;
+  for (const button of buttons) {
+    button.setAttribute("aria-pressed", String(button.dataset.tool === tool));
+  }
+}
+
+function surface(width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+function screen(e) { return [e.clientX, e.clientY]; }
+function world([x, y]) { return [(x - camera.x) / camera.zoom, (y - camera.y) / camera.zoom]; }
+function pixel([x, y]) { return [x * board.width / board.clientWidth, y * board.height / board.clientHeight]; }
+
+function resize() {
+  const ratio = Math.min(devicePixelRatio || 1, 2560 / Math.max(board.clientWidth, board.clientHeight));
+  board.width = Math.max(1, Math.round(board.clientWidth * ratio));
+  board.height = Math.max(1, Math.round(board.clientHeight * ratio));
+  redraw();
+}
+function redraw() { dirty = true; schedule(); }
+function schedule() {
+  if (!frame) frame = requestAnimationFrame(() => {
+    frame = 0;
+    flushStroke();
+    render();
+  });
+}
+
+function path(context, points, width, paint) {
+  context.lineWidth = width;
+  context.lineCap = context.lineJoin = "round";
+  context.strokeStyle = context.fillStyle = paint;
+  context.beginPath();
+  const [x, y] = points[0];
+  if (points.length === 1) {
+    context.arc(x, y, width / 2, 0, 2 * Math.PI);
+    context.fill();
+    return;
+  }
+  context.moveTo(x, y);
+  for (const point of points.slice(1)) context.lineTo(...point);
+  context.stroke();
+}
+
+function render() {
+  const sx = board.width / board.clientWidth, sy = board.height / board.clientHeight;
+  if (dirty) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, board.width, board.height);
+    painted = 0;
+    dirty = false;
+  }
+  ctx.setTransform(sx * camera.zoom, 0, 0, sy * camera.zoom, sx * camera.x, sy * camera.y);
+  while (painted < ordered.length) {
+    const entry = actions.get(ordered[painted]);
+    if (entry.waiting) return false;
+    const action = entry.action;
+    if (entry.image) ctx.drawImage(entry.image, action.x, action.y, action.w, action.h);
+    else if (!action.png) path(ctx, action.points, action.width, action.color);
+    painted++;
+  }
+  return true;
+}
+
+function valid(a) {
+  if (!a || typeof a !== "object") return false;
+  if (a.png) {
+    return typeof a.png === "string" && a.png.startsWith("data:image/png;base64,")
+      && a.png.length < 8_000_000 && [a.x, a.y, a.w, a.h].every(Number.isFinite)
+      && a.w > 0 && a.h > 0;
+  }
+  return typeof a.color === "string" && /^#[0-9a-f]{6}$/i.test(a.color)
+    && Number.isFinite(a.width) && a.width > 0 && a.width <= 80
+    && Array.isArray(a.points) && a.points.length > 0 && a.points.length <= 128
+    && a.points.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite));
+}
+
+function receive(id, action, image) {
+  const existed = actions.has(id);
+  if (!valid(action)) {
+    if (existed) remove(id);
+    return;
+  }
+  const entry = { action, image, waiting: Boolean(action.png && !image) };
+  actions.set(id, entry);
+  if (!existed && (!ordered.length || id > ordered[ordered.length - 1])) ordered.push(id);
+  else {
+    if (!existed) { ordered.push(id); ordered.sort(); }
+    dirty = true;
+  }
+  if (entry.waiting) {
+    const decoded = new Image();
+    decoded.src = action.png;
+    decoded.decode().then(() => { entry.image = decoded; }).catch(() => {
+      status.textContent = "A saved raster action could not be decoded";
+    }).finally(() => { entry.waiting = false; schedule(); });
+  }
+  schedule();
+}
+
+function remove(id) {
+  if (!actions.delete(id)) return;
+  ordered = ordered.filter(key => key !== id);
+  redraw();
+}
+
+function publish(action, image) {
+  if (writeAction) writeAction(action, image);
+  else receive("~" + String(++localId).padStart(12, "0"), action, image);
+}
+
+async function connect() {
+  if (!firebaseConfig.databaseURL) { status.textContent = "Local · Add databaseURL"; return; }
+  try {
+    const [{ initializeApp }, db] = await Promise.all([
+      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js"),
+      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-database.js")
+    ]);
+    const database = db.getDatabase(initializeApp(firebaseConfig));
+    const log = db.ref(database, "whiteboard/actions");
+    let ready = false, online = false, denied = false, writeError = false;
+    const report = () => {
+      status.textContent = denied ? "Local · Database read denied" : writeError ? "Database write failed"
+        : !ready ? "Loading shared board…" : online ? "Shared · Online" : "Offline · Writes queued";
+    };
+    const fail = () => { loading = false; denied = true; writeAction = null; report(); };
+    db.onValue(db.ref(database, ".info/connected"), s => { online = s.val(); report(); });
+    db.onChildAdded(log, s => { if (!actions.has(s.key)) receive(s.key, s.val()); }, fail);
+    db.onChildChanged(log, s => receive(s.key, s.val()), fail);
+    db.onChildRemoved(log, s => remove(s.key), fail);
+    db.onValue(log, () => {
+      loading = false;
+      ready = true;
+      writeAction = (action, image) => {
+        const item = db.push(log);
+        receive(item.key, action, image);
+        db.set(item, action).then(() => { writeError = false; report(); }).catch(() => {
+          remove(item.key);
+          writeError = true;
+          report();
+        });
+      };
+      report();
+    }, fail, { onlyOnce: true });
+  } catch {
+    loading = false;
+    status.textContent = "Local · Firebase could not start";
+  }
+}
+
+function rasterAction(canvas, left, top, width, height) {
+  const [x, y] = world([left, top]);
+  publish({ x, y, w: width / camera.zoom, h: height / camera.zoom, png: canvas.toDataURL() }, canvas);
+}
+
+function sample(left, top, width, height) {
+  const scale = Math.min(1, rasterLimit / Math.max(width, height));
+  const image = surface(Math.max(1, Math.ceil(width * scale)), Math.max(1, Math.ceil(height * scale)));
+  const context = image.getContext("2d", { willReadFrequently: true });
+  const [sx, sy] = pixel([left, top]);
+  const [sw, sh] = pixel([width, height]);
+  context.drawImage(board, sx, sy, sw, sh, 0, 0, image.width, image.height);
+  return [image, context];
+}
+
+function fill([x, y]) {
+  if (!render()) return;
+  const width = board.clientWidth, height = board.clientHeight;
+  const [image, context] = sample(0, 0, width, height);
+  const w = image.width, h = image.height;
+  const pixels = context.getImageData(0, 0, w, h).data;
+  const patch = context.createImageData(w, h);
+  const start = Math.floor(y * h / height) * w + Math.floor(x * w / width);
+  const target = pixels.slice(start * 4, start * 4 + 3);
+  const rgb = [1, 3, 5].map(i => parseInt(color.value.slice(i, i + 2), 16));
+  if (target.every((value, i) => value === rgb[i])) return;
+
+  const queue = new Uint32Array(w * h);
+  let head = 0, tail = 0;
+  function visit(index) {
+    const offset = index * 4;
+    if (patch.data[offset + 3] || target.some((value, i) => Math.abs(value - pixels[offset + i]) > 20)) return;
+    patch.data.set(rgb, offset);
+    patch.data[offset + 3] = 255;
+    queue[tail++] = index;
+  }
+  visit(start);
+  while (head < tail) {
+    const i = queue[head++];
+    if (i % w) visit(i - 1);
+    if (i % w < w - 1) visit(i + 1);
+    if (i >= w) visit(i - w);
+    if (i < w * (h - 1)) visit(i + w);
+  }
+  context.putImageData(patch, 0, 0);
+  rasterAction(image, 0, 0, width, height);
+}
+
+function blur(points, width) {
+  if (!render()) return;
+  const view = points.map(([x, y]) => [x * camera.zoom + camera.x, y * camera.zoom + camera.y]);
+  const diameter = width * camera.zoom;
+  const padding = diameter * 1.5 + 4;
+  const xs = view.map(p => p[0]), ys = view.map(p => p[1]);
+  const left = Math.max(0, Math.floor(Math.min(...xs) - padding));
+  const top = Math.max(0, Math.floor(Math.min(...ys) - padding));
+  const w = Math.min(board.clientWidth, Math.ceil(Math.max(...xs) + padding)) - left;
+  const h = Math.min(board.clientHeight, Math.ceil(Math.max(...ys) + padding)) - top;
+  if (w <= 0 || h <= 0) return;
+  const [source] = sample(left, top, w, h);
+  const image = surface(source.width, source.height);
+  const out = image.getContext("2d");
+  const scale = image.width / w, sy = image.height / h;
+  const radius = Math.max(1, diameter * scale / 5);
+  if ("filter" in out) {
+    out.filter = "blur(" + radius + "px)";
+    out.drawImage(source, 0, 0);
+    out.filter = "none";
+  } else {
+    const small = surface(Math.max(1, Math.ceil(image.width / radius)), Math.max(1, Math.ceil(image.height / radius)));
+    small.getContext("2d").drawImage(source, 0, 0, small.width, small.height);
+    out.drawImage(small, 0, 0, image.width, image.height);
+  }
+  const mask = surface(image.width, image.height);
+  const m = mask.getContext("2d");
+  path(m, view.map(([x, y]) => [(x - left) * scale, (y - top) * sy]), diameter * scale, "black");
+  out.globalCompositeOperation = "destination-in";
+  out.drawImage(mask, 0, 0);
+  rasterAction(image, left, top, w, h);
+}
+
+function activate(point) {
+  const [x, y] = point;
+  if (x < 0 || y < 0 || x >= board.clientWidth || y >= board.clientHeight) return;
+  if (tool === "fill") fill(point);
+  if (tool === "pick" && render()) {
+    const rgb = ctx.getImageData(...pixel(point).map(Math.floor), 1, 1).data;
+    color.value = "#" + Array.from(rgb.slice(0, 3), n => n.toString(16).padStart(2, "0")).join("");
+    select("brush");
+  }
+}
+
+function flushStroke() {
+  if (!stroke?.pending.length) return;
+  while (stroke.pending.length) {
+    const points = stroke.pending.splice(0, 127);
+    if (stroke.last) points.unshift(stroke.last);
+    stroke.last = points[points.length - 1];
+    if (stroke.tool === "blur") blur(points, stroke.width);
+    else publish({ points, width: stroke.width, color: stroke.color });
+  }
+}
+function endStroke(commit = true) {
+  if (!stroke) return;
+  if (commit && stroke.tap) activate(stroke.tap);
+  if (commit && !stroke.tap) {
+    if (!stroke.last && !stroke.pending.length) stroke.pending.push(stroke.start);
+    flushStroke();
+  }
+  stroke = null;
+}
+
+function zoom(from, to, factor) {
+  const [x, y] = world(from);
+  camera.zoom = Math.max(0.05, Math.min(32, camera.zoom * factor));
+  camera.x = to[0] - x * camera.zoom;
+  camera.y = to[1] - y * camera.zoom;
+  redraw();
+}
+function touchPair() {
+  const [[x, y], [u, v]] = [...touches.values()];
+  return { center: [(x + u) / 2, (y + v) / 2], distance: Math.max(1, Math.hypot(u - x, v - y)) };
+}
+function cursor() {
+  board.classList.toggle("pan", space);
+  board.classList.toggle("drag", Boolean(pan || gesture));
+}
+
+board.onpointerdown = e => {
+  if (e.button !== 0) return;
+  const point = screen(e);
+  board.setPointerCapture(e.pointerId);
+  if (e.pointerType === "touch") {
+    touches.set(e.pointerId, point);
+    if (touches.size >= 2) {
+      if (stroke?.last) endStroke();
+      else endStroke(false);
+      touchNavigation = true;
+      gesture = touchPair();
+      cursor();
+    }
+    if (touchNavigation) return;
+  }
+  if (stroke || pan) return;
+  if (space && e.pointerType !== "touch") {
+    pan = { id: e.pointerId, point };
+    cursor();
+  } else if (loading) {
+    return;
+  } else if (tool === "fill" || tool === "pick") {
+    if (e.pointerType === "touch") stroke = { id: e.pointerId, tap: point, pending: [] };
+    else activate(point);
+  } else {
+    stroke = { id: e.pointerId, tool, width: Number(size.value), pending: [], start: world(point),
+      color: tool === "eraser" ? "#ffffff" : color.value };
+    if (e.pointerType !== "touch") { stroke.pending.push(stroke.start); schedule(); }
+  }
+};
+board.onpointermove = e => {
+  const point = screen(e);
+  if (touches.has(e.pointerId)) {
+    touches.set(e.pointerId, point);
+    if (touchNavigation) {
+      if (touches.size >= 2) {
+        const next = touchPair();
+        if (gesture) zoom(gesture.center, next.center, next.distance / gesture.distance);
+        gesture = next;
+      }
+      return;
+    }
+  }
+  if (pan?.id === e.pointerId) {
+    camera.x += point[0] - pan.point[0];
+    camera.y += point[1] - pan.point[1];
+    pan.point = point;
+    redraw();
+  } else if (stroke?.id === e.pointerId && !stroke.tap) {
+    if (!stroke.last && !stroke.pending.length) stroke.pending.push(stroke.start);
+    const events = e.getCoalescedEvents?.();
+    for (const sample of events?.length ? events : [e]) stroke.pending.push(world(screen(sample)));
+    schedule();
+  }
+};
+function release(e) {
+  if (stroke?.id === e.pointerId) {
+    const point = world(screen(e));
+    const last = stroke.pending.at(-1) || stroke.last || stroke.start;
+    if (e.type === "pointerup" && !stroke.tap && last.some((value, i) => value !== point[i])) {
+      if (!stroke.last && !stroke.pending.length) stroke.pending.push(stroke.start);
+      stroke.pending.push(point);
+    }
+    endStroke(e.type === "pointerup" || Boolean(stroke.last));
+  }
+  if (pan?.id === e.pointerId) pan = null;
+  if (touches.delete(e.pointerId)) {
+    gesture = touches.size >= 2 ? touchPair() : null;
+    if (!touches.size) touchNavigation = false;
+  }
+  cursor();
+}
+board.onpointerup = board.onpointercancel = board.onlostpointercapture = release;
+board.addEventListener("wheel", e => {
+  e.preventDefault();
+  const point = screen(e);
+  const units = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? board.clientHeight : 1;
+  zoom(point, point, Math.exp(-e.deltaY * units * 0.0015));
+}, { passive: false });
+addEventListener("keydown", e => {
+  if (e.code !== "Space" || e.target.closest?.("button, input, textarea, [contenteditable]")) return;
+  e.preventDefault();
+  space = true;
+  cursor();
+});
+addEventListener("keyup", e => { if (e.code === "Space") { space = false; cursor(); } });
+addEventListener("blur", () => { space = false; cursor(); });
+addEventListener("resize", resize);
+resize();
+connect();
+</script>
+</body>
+</html>
+
