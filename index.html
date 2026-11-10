@@ -9,6 +9,25 @@
   * { box-sizing: border-box }
   body { margin: 0; background: white; color: #182230; font: 14px system-ui, sans-serif }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; -webkit-touch-callout: none; cursor: crosshair }
+  #timeline:not([hidden]) { display: grid; gap: 6px; position: fixed; bottom: 0; left: 0; right: 0;
+    padding: 6px max(8px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    background: #20232b; color: #f5f6f8; z-index: 2 }
+  .timeline-controls { display: flex; align-items: center; gap: 5px; overflow-x: auto; white-space: nowrap }
+  .timeline-controls button, #frame-track button { color: inherit; background: #353944; min-height: 34px }
+  #frame-track { display: flex; overflow-x: auto; gap: 3px }
+  #frame-track button { flex: 0 0 50px; border-radius: 3px }
+  #frame-track button[aria-current="step"] { background: #176bbb; border-color: #8ec7ff }
+  #frame-track button[data-drawn]::before { content: "◆ "; font-size: 9px }
+  #animation-fps { width: 45px; font: inherit }
+  #animation-toggle { pointer-events: auto }
+  body.animation-mode footer { bottom: calc(104px + env(safe-area-inset-bottom)) }
+  body.animation-mode #scheme-playback { bottom: calc(152px + env(safe-area-inset-bottom)) }
+  body.focus-mode #timeline { display: none }
+  @media (pointer: coarse), (max-width: 540px) {
+    body.animation-mode footer { bottom: auto }
+    body.animation-mode header { bottom: calc(104px + env(safe-area-inset-bottom)) }
+    body.animation-mode #scheme-playback { bottom: auto }
+  }
   #camera-preview { pointer-events: none; transform-origin: 0 0; will-change: transform }
   #reference { position: fixed; top: 0; left: 0; max-width: none; transform-origin: 0 0;
     opacity: .32; pointer-events: none; user-select: none }
@@ -108,10 +127,23 @@
   <button id="status" type="button" aria-live="polite">Подключение…</button>
   <span>ПКМ или пробел + перетаскивание · Колесо для масштаба · Alt + колесо для поворота</span>
   <div class="view-buttons">
+    <button id="animation-toggle" type="button" aria-pressed="false">Анимация</button>
     <button id="name-button" type="button">Имя</button>
     <button id="fullscreen" type="button" aria-label="На весь экран" title="На весь экран" aria-pressed="false">⛶</button>
   </div>
 </footer>
+<section id="timeline" aria-label="Шкала кадров" hidden>
+  <div class="timeline-controls">
+    <button id="animation-play" type="button">▶ Пуск</button>
+    <button id="frame-add" type="button">+ Кадр</button>
+    <button id="frame-copy" type="button">Копия</button>
+    <button id="frame-delete" type="button">Удалить кадр</button>
+    <label>Кадр/с <input id="animation-fps" type="number" min="1" max="24" value="8"></label>
+    <output id="animation-position"></output>
+    <output id="animation-save-status" aria-live="polite"></output>
+  </div>
+  <div id="frame-track" aria-label="Кадры"></div>
+</section>
 <div id="author-tip" role="tooltip" hidden></div>
 <dialog id="name-panel" aria-labelledby="name-title">
   <h2 id="name-title">Имя на доске</h2>
@@ -169,7 +201,7 @@ function positionCursors() {
   for (const { marker, data } of remoteCursors.values()) {
     const [x, y] = view([data.x, data.y]);
     marker.style.transform = `translate(${x}px,${y}px)`;
-    marker.hidden = Date.now() - data.updated > 15000;
+    marker.hidden = animationMode || Date.now() - data.updated > 15000;
   }
 }
 
@@ -217,7 +249,7 @@ function connectCursors(db, database, authSdk, auth) {
     attach();
   });
   shareCursor = (point, touch = false) => {
-    if (!enabled || !own) return;
+    if (!enabled || !own || (point && animationMode)) return;
     if (!point) {
       clearTimeout(timer);
       timer = 0;
@@ -259,6 +291,171 @@ function cleanName(value) {
 let undoing = false;
 const camera = { x: 0, y: 0, zoom: 1, angle: 0, cos: 1, sin: 0 };
 const actions = new Map();
+const animationToggle = document.querySelector("#animation-toggle");
+const timeline = document.querySelector("#timeline");
+const frameTrack = document.querySelector("#frame-track");
+const fpsInput = document.querySelector("#animation-fps");
+const animationPlay = document.querySelector("#animation-play");
+const frameDelete = document.querySelector("#frame-delete");
+const animationPosition = document.querySelector("#animation-position");
+const animationSaveStatus = document.querySelector("#animation-save-status");
+let animationMode = false, frameIndex = 0, playback = 0, saveTimer = 0;
+let animationStore;
+let animationFrames = [{ actions: new Map(), undo: [] }];
+
+function activeActions() {
+  return animationMode ? animationFrames[frameIndex].actions : actions;
+}
+
+function activeUndo() {
+  return animationMode ? animationFrames[frameIndex].undo : undoHistory;
+}
+
+function openAnimationStore() {
+  if (!animationStore) animationStore = new Promise((resolve, reject) => {
+    const request = indexedDB.open("draw-animation", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("projects");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("storage blocked"));
+  });
+  return animationStore;
+}
+
+let animationLoaded = false;
+async function loadAnimation() {
+  if (animationLoaded) return;
+  animationLoaded = true;
+  try {
+    const database = await openAnimationStore();
+    const data = await new Promise((resolve, reject) => {
+      const request = database.transaction("projects").objectStore("projects").get("local");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    if (!data?.frames?.length) return;
+    animationFrames = data.frames.map(entries => {
+      const frame = { actions: new Map(), undo: [] };
+      for (const action of entries) {
+        const id = "~" + String(++localId).padStart(12, "0");
+        receive(id, action, null, frame.actions);
+      }
+      return frame;
+    });
+    fpsInput.value = data.fps || 8;
+  } catch {
+    animationSaveStatus.textContent = "Память браузера недоступна";
+  }
+}
+
+function saveAnimation() {
+  animationSaveStatus.textContent = "Сохранение…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      const database = await openAnimationStore();
+      const transaction = database.transaction("projects", "readwrite");
+      const frames = animationFrames.map(frame => [...frame.actions.values()].map(entry => entry.action));
+      transaction.objectStore("projects").put({ frames, fps: animationFps() }, "local");
+      transaction.oncomplete = () => { animationSaveStatus.textContent = "Сохранено в браузере"; };
+      transaction.onerror = transaction.onabort = () => {
+        animationSaveStatus.textContent = "Не удалось сохранить анимацию";
+      };
+    } catch {
+      animationSaveStatus.textContent = "Не удалось сохранить анимацию";
+    }
+  }, 150);
+}
+
+function animationFps() {
+  return Math.max(1, Math.min(24, Math.round(Number(fpsInput.value)) || 8));
+}
+
+function stopAnimation() {
+  clearInterval(playback);
+  playback = 0;
+  animationPlay.textContent = "▶ Пуск";
+}
+
+function updateTimeline() {
+  animationPosition.textContent = `Кадр ${frameIndex + 1} / ${animationFrames.length} · ${(frameIndex / animationFps()).toFixed(2)} с`;
+  frameDelete.disabled = animationFrames.length === 1;
+  if (frameTrack.children.length !== animationFrames.length) {
+    frameTrack.replaceChildren(...animationFrames.map((_, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = String(index + 1);
+      button.setAttribute("aria-label", "Кадр " + (index + 1));
+      button.onclick = () => {
+        stopAnimation();
+        showAnimationFrame(index);
+      };
+      return button;
+    }));
+  }
+  for (const [index, button] of [...frameTrack.children].entries()) {
+    button.toggleAttribute("data-drawn", animationFrames[index].actions.size > 0);
+    button.title = `Кадр ${index + 1} · ${(index / animationFps()).toFixed(2)} с`;
+    if (index === frameIndex) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  }
+  if (!playback) frameTrack.children[frameIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function showAnimationFrame(index) {
+  if (stroke) endStroke(Boolean(stroke.last || stroke.pending.length) && !stroke.tap);
+  finishCamera();
+  frameIndex = index;
+  rebuildOrder = true;
+  remember([]);
+  redraw();
+  updateTimeline();
+}
+
+animationToggle.onclick = async () => {
+  animationToggle.disabled = true;
+  if (!animationMode) await loadAnimation();
+  if (stroke) endStroke(Boolean(stroke.last || stroke.pending.length) && !stroke.tap);
+  stopAnimation();
+  shareCursor(null);
+  animationMode = !animationMode;
+  timeline.hidden = !animationMode;
+  document.body.classList.toggle("animation-mode", animationMode);
+  animationToggle.setAttribute("aria-pressed", String(animationMode));
+  animationToggle.textContent = animationMode ? "К доске" : "Анимация";
+  showAnimationFrame(frameIndex);
+  animationToggle.disabled = false;
+};
+
+function insertAnimationFrame(copy) {
+  stopAnimation();
+  if (stroke) endStroke(Boolean(stroke.last || stroke.pending.length) && !stroke.tap);
+  animationFrames.splice(frameIndex + 1, 0, { actions: new Map(copy ? activeActions() : []), undo: [] });
+  showAnimationFrame(frameIndex + 1);
+  saveAnimation();
+}
+document.querySelector("#frame-add").onclick = () => insertAnimationFrame(false);
+document.querySelector("#frame-copy").onclick = () => insertAnimationFrame(true);
+frameDelete.onclick = () => {
+  if (animationFrames.length === 1) return;
+  stopAnimation();
+  if (stroke) endStroke(Boolean(stroke.last || stroke.pending.length) && !stroke.tap);
+  animationFrames.splice(frameIndex, 1);
+  showAnimationFrame(Math.min(frameIndex, animationFrames.length - 1));
+  saveAnimation();
+};
+animationPlay.onclick = () => {
+  if (playback) { stopAnimation(); return; }
+  if (animationFrames.length < 2) return;
+  playback = setInterval(() => showAnimationFrame((frameIndex + 1) % animationFrames.length), 1000 / animationFps());
+  animationPlay.textContent = "Ⅱ Пауза";
+};
+fpsInput.onchange = () => {
+  stopAnimation();
+  fpsInput.value = animationFps();
+  updateTimeline();
+  saveAnimation();
+};
 const coarse = matchMedia("(pointer: coarse)");
 const panel = document.querySelector("#panel");
 const login = document.querySelector("#admin-login");
@@ -578,8 +775,9 @@ function path(context, points, width, paint) {
 
 let renderedView = null;
 function render(deadline = Infinity) {
+  const visible = activeActions();
   if (rebuildOrder) {
-    ordered = [...actions.keys()].sort();
+    ordered = [...visible.keys()].sort();
     rebuildOrder = false;
   }
   const sx = board.width / board.clientWidth, sy = board.height / board.clientHeight;
@@ -603,7 +801,7 @@ function render(deadline = Infinity) {
       schedule();
       return false;
     }
-    const entry = actions.get(ordered[painted]);
+    const entry = visible.get(ordered[painted]);
     const [x, y, r, b] = entry.bounds;
     if (r < left || b < top || x > right || y > bottom) {
       painted++;
@@ -639,10 +837,10 @@ function valid(a) {
     && a.points.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite));
 }
 
-function receive(id, action, image) {
-  const existed = actions.has(id);
+function receive(id, action, image, destination = actions) {
+  const existed = destination.has(id);
   if (!valid(action)) {
-    if (existed) remove(id);
+    if (existed) remove(id, destination);
     return;
   }
   let bounds;
@@ -654,11 +852,14 @@ function receive(id, action, image) {
       Math.max(...xs) + radius, Math.max(...ys) + radius];
   }
   const entry = { action, image, bounds, waiting: Boolean(action.png && !image) };
-  actions.set(id, entry);
-  if (!rebuildOrder && !existed && (!ordered.length || id > ordered[ordered.length - 1])) ordered.push(id);
-  else {
-    if (!existed) rebuildOrder = true;
-    dirty = true;
+  destination.set(id, entry);
+  if (destination === activeActions()) {
+    if (!rebuildOrder && !existed && (!ordered.length || id > ordered[ordered.length - 1])) ordered.push(id);
+    else {
+      if (!existed) rebuildOrder = true;
+      dirty = true;
+    }
+    schedule();
   }
   if (entry.waiting) {
     const decoded = new Image();
@@ -667,27 +868,33 @@ function receive(id, action, image) {
       status.textContent = "Не удалось загрузить сохранённую заливку или размытие";
     }).finally(() => { entry.waiting = false; schedule(); });
   }
-  schedule();
 }
 
-function remove(id) {
-  if (!actions.delete(id)) return;
+function remove(id, destination = actions) {
+  if (!destination.delete(id) || destination !== activeActions()) return;
   rebuildOrder = true;
   redraw();
 }
 
 function remember(ids) {
-  if (ids.length) undoHistory.push(ids);
-  undoButton.disabled = undoing || !undoHistory.length;
+  const history = activeUndo();
+  if (ids.length) {
+    history.push(ids);
+    if (animationMode) {
+      updateTimeline();
+      saveAnimation();
+    }
+  }
+  undoButton.disabled = undoing || !history.length;
 }
 
 function publish(action, image, group) {
   action.name = displayName || "Гость";
   let id;
-  if (writeAction) id = writeAction(action, image);
+  if (!animationMode && writeAction) id = writeAction(action, image);
   else {
     id = "~" + String(++localId).padStart(12, "0");
-    receive(id, action, image);
+    receive(id, action, image, activeActions());
   }
   if (group) group.push(id);
   else remember([id]);
@@ -696,23 +903,29 @@ function publish(action, image, group) {
 async function undo() {
   if (undoing) return;
   if (stroke) endStroke(Boolean(stroke.last || stroke.pending.length) && !stroke.tap);
+  const history = activeUndo();
+  const destination = activeActions();
   let ids = [];
-  while (!ids.length && undoHistory.length) {
-    ids = undoHistory.pop().filter(id => actions.has(id));
+  while (!ids.length && history.length) {
+    ids = history.pop().filter(id => destination.has(id));
   }
   if (!ids.length) {
     remember([]);
     return;
   }
-  const undoIndex = undoHistory.length;
+  const undoIndex = history.length;
   undoing = true;
   remember([]);
   try {
     const shared = ids.filter(id => !id.startsWith("~"));
     if (shared.length) await deleteActions(shared);
-    for (const id of ids) if (id.startsWith("~")) remove(id);
+    for (const id of ids) if (id.startsWith("~")) remove(id, destination);
+    if (destination !== actions) {
+      updateTimeline();
+      saveAnimation();
+    }
   } catch {
-    undoHistory.splice(undoIndex, 0, ids);
+    history.splice(undoIndex, 0, ids);
     status.textContent = "Не удалось отменить изменение";
   } finally {
     undoing = false;
@@ -1021,7 +1234,7 @@ function inspectAuthor(point) {
   const margin = 3 / camera.zoom;
   authorTip.hidden = true;
   for (let i = painted - 1; i >= 0; i--) {
-    const entry = actions.get(ordered[i]);
+    const entry = activeActions().get(ordered[i]);
     if (!entry?.action.points) continue;
     const [left, top, right, bottom] = entry.bounds;
     if (x < left - margin || x > right + margin || y < top - margin || y > bottom + margin) continue;
@@ -1126,6 +1339,7 @@ board.onpointerdown = e => {
   const rightMouse = e.pointerType === "mouse" && e.button === 2;
   if (e.button !== 0 && !rightMouse) return;
   const point = screen(e);
+  if (animationMode && playback) stopAnimation();
   clearTimeout(touchCursorHide);
   shareCursor(point, e.pointerType === "touch");
   board.setPointerCapture(e.pointerId);
@@ -1145,7 +1359,7 @@ board.onpointerdown = e => {
   if (rightMouse || tool === "hand" || (space && e.pointerType !== "touch")) {
     pan = { id: e.pointerId, point };
     cursor();
-  } else if (loading) {
+  } else if (loading && !animationMode) {
     return;
   } else if (tool === "fill" || tool === "pick") {
     finishCamera();
