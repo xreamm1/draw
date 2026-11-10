@@ -43,6 +43,11 @@
   .tool-icon, #fullscreen { display: none }
   body.focus-mode header, body.focus-mode footer > span, body.focus-mode #status { display: none }
   body.focus-mode footer { justify-content: flex-end }
+  #name-button { pointer-events: auto; background: white; border-color: #d9e0e8; min-height: 44px }
+  #author-tip { position: fixed; z-index: 1; pointer-events: none; background: #182230; color: white;
+    padding: 5px 8px; border-radius: 6px; max-width: min(220px, calc(100vw - 16px)); overflow-wrap: anywhere }
+  .view-buttons { display: flex; align-items: center; gap: 5px }
+  body.focus-mode #name-button { display: none }
   #fullscreen { pointer-events: auto; touch-action: manipulation; background: white;
     border-color: #d9e0e8; min-width: 44px; font-size: 20px }
   @media (pointer: coarse), (max-width: 540px) {
@@ -80,8 +85,20 @@
 <footer>
   <button id="status" type="button" aria-live="polite">Подключение…</button>
   <span>ПКМ или пробел + перетаскивание · Колесо для масштаба · Alt + колесо для поворота</span>
-  <button id="fullscreen" type="button" aria-label="На весь экран" title="На весь экран" aria-pressed="false">⛶</button>
+  <div class="view-buttons">
+    <button id="name-button" type="button">Имя</button>
+    <button id="fullscreen" type="button" aria-label="На весь экран" title="На весь экран" aria-pressed="false">⛶</button>
+  </div>
 </footer>
+<div id="author-tip" role="tooltip" hidden></div>
+<dialog id="name-panel" aria-labelledby="name-title">
+  <h2 id="name-title">Имя на доске</h2>
+  <form method="dialog">
+    <label>Отображаемое имя <input id="display-name" type="text" maxlength="32" autocomplete="nickname"></label>
+    <button value="save">Сохранить</button>
+    <button value="cancel">Отмена</button>
+  </form>
+</dialog>
 <dialog id="panel" aria-labelledby="panel-title">
   <h2 id="panel-title">Управление доской</h2>
   <form id="admin-login">
@@ -118,6 +135,26 @@ const status = document.querySelector("#status");
 const buttons = document.querySelectorAll("[data-tool]");
 const undoButton = document.querySelector("#undo");
 const undoHistory = [];
+const nameButton = document.querySelector("#name-button");
+const namePanel = document.querySelector("#name-panel");
+const nameInput = document.querySelector("#display-name");
+const authorTip = document.querySelector("#author-tip");
+let displayName = "";
+try { displayName = cleanName(localStorage.getItem("whiteboard-name")); } catch {}
+nameButton.onclick = () => {
+  nameInput.value = displayName;
+  namePanel.returnValue = "";
+  namePanel.showModal();
+};
+namePanel.querySelector("form").onsubmit = event => {
+  if (event.submitter?.value === "cancel") return;
+  displayName = cleanName(nameInput.value);
+  try { localStorage.setItem("whiteboard-name", displayName); } catch {}
+};
+
+function cleanName(value) {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 32) : "";
+}
 let undoing = false;
 const camera = { x: 0, y: 0, zoom: 1, angle: 0, cos: 1, sin: 0 };
 const actions = new Map();
@@ -265,7 +302,7 @@ function resize() {
   board.height = Math.max(1, Math.round(board.clientHeight * ratio));
   redraw();
 }
-function redraw() { dirty = true; positionScheme(); schedule(); }
+function redraw() { dirty = true; authorTip.hidden = true; positionScheme(); schedule(); }
 function schedule() {
   if (!frame) frame = requestAnimationFrame(() => {
     frame = 0;
@@ -386,6 +423,7 @@ function remember(ids) {
 }
 
 function publish(action, image, group) {
+  action.name = displayName || "Гость";
   let id;
   if (writeAction) id = writeAction(action, image);
   else {
@@ -625,6 +663,46 @@ function sampleScheme(point) {
   return rgba[3] ? rgba : null;
 }
 
+function strokeDistanceSquared(x, y, [ax, ay], [bx, by]) {
+  const dx = bx - ax, dy = by - ay;
+  const length = dx * dx + dy * dy;
+  const t = length ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / length)) : 0;
+  return (x - ax - t * dx) ** 2 + (y - ay - t * dy) ** 2;
+}
+
+function inspectAuthor(point) {
+  const [x, y] = world(point);
+  const margin = 3 / camera.zoom;
+  authorTip.hidden = true;
+  for (let i = painted - 1; i >= 0; i--) {
+    const entry = actions.get(ordered[i]);
+    if (!entry?.action.points) continue;
+    const [left, top, right, bottom] = entry.bounds;
+    if (x < left - margin || x > right + margin || y < top - margin || y > bottom + margin) continue;
+    const { points, width, color, name } = entry.action;
+    const radius = width / 2 + (color === "#ffffff" ? 0 : margin);
+    const radiusSquared = radius * radius;
+    if (!points.some((p, j) => strokeDistanceSquared(x, y, points[Math.max(0, j - 1)], p) <= radiusSquared)) continue;
+    if (color === "#ffffff") return;
+    authorTip.textContent = cleanName(name) || "Имя не указано";
+    authorTip.hidden = false;
+    authorTip.style.left = Math.max(4, Math.min(point[0] + 12, board.clientWidth - authorTip.offsetWidth - 4)) + "px";
+    authorTip.style.top = Math.max(4, Math.min(point[1] + 14, board.clientHeight - authorTip.offsetHeight - 4)) + "px";
+    return;
+  }
+}
+
+let hoverPoint = null, hoverFrame = 0;
+board.onpointerleave = () => { hoverPoint = null; authorTip.hidden = true; };
+board.addEventListener("pointermove", event => {
+  if (event.pointerType !== "mouse" || event.buttons || stroke || pan) return;
+  hoverPoint = screen(event);
+  if (!hoverFrame) hoverFrame = requestAnimationFrame(() => {
+    hoverFrame = 0;
+    if (hoverPoint && !stroke && !pan) inspectAuthor(hoverPoint);
+  });
+});
+
 function activate(point) {
   const [x, y] = point;
   if (x < 0 || y < 0 || x >= board.clientWidth || y >= board.clientHeight) return;
@@ -693,6 +771,8 @@ function cursor() {
 
 board.oncontextmenu = e => e.preventDefault();
 board.onpointerdown = e => {
+  hoverPoint = null;
+  authorTip.hidden = true;
   const rightMouse = e.pointerType === "mouse" && e.button === 2;
   if (e.button !== 0 && !rightMouse) return;
   const point = screen(e);
@@ -788,8 +868,8 @@ board.addEventListener("wheel", e => {
   else transformView(point, point, Math.exp(-delta * 0.0015));
 }, { passive: false });
 addEventListener("keydown", e => {
-  if (e.code === "Escape" && !panel.open && !document.fullscreenElement) focusMode(false);
-  if (e.target.closest?.("textarea, [contenteditable]")) return;
+  if (e.code === "Escape" && !document.querySelector("dialog[open]") && !document.fullscreenElement) focusMode(false);
+  if (e.target.closest?.("textarea, input[type=text], input[type=email], input[type=password], [contenteditable]")) return;
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyZ") {
     e.preventDefault();
     if (!e.repeat) undo();
