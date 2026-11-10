@@ -664,9 +664,10 @@ function surface(width, height) {
 }
 
 function screen(e) { return [e.clientX, e.clientY]; }
-function world([x, y]) {
-  const dx = (x - camera.x) / camera.zoom, dy = (y - camera.y) / camera.zoom;
-  return [dx * camera.cos + dy * camera.sin, dy * camera.cos - dx * camera.sin];
+function world(point) { return worldInView(point, camera); }
+function worldInView([x, y], viewport) {
+  const dx = (x - viewport.x) / viewport.zoom, dy = (y - viewport.y) / viewport.zoom;
+  return [dx * viewport.cos + dy * viewport.sin, dy * viewport.cos - dx * viewport.sin];
 }
 function view([x, y]) {
   return [camera.x + (x * camera.cos - y * camera.sin) * camera.zoom,
@@ -681,43 +682,52 @@ function rectangleBounds(x, y, w, h, angle) {
 function pixel([x, y]) { return [x * board.width / board.clientWidth, y * board.height / board.clientHeight]; }
 
 const cameraPreview = document.querySelector("#camera-preview");
-let previewView = null, cameraIdle = 0, settlingCamera = false;
+let previewView = null, previewTarget = null, cameraIdle = 0, previewTimer = 0, settlingCamera = false;
 
 function captureCameraPreview() {
   if (cameraPreview.width !== board.width) cameraPreview.width = board.width;
   if (cameraPreview.height !== board.height) cameraPreview.height = board.height;
   const previewContext = cameraPreview.getContext("2d", { alpha: false });
   previewContext.drawImage(board, 0, 0);
-  previewView = { x: camera.x, y: camera.y, zoom: camera.zoom, angle: camera.angle };
+  previewView = renderedView;
 }
 
 function moveCamera() {
   if (stroke && !stroke.tap) { redraw(); return; }
   if (!previewView) {
-    const previous = renderedView;
-    if (!previous) { redraw(); return; }
+    if (!renderedView) { redraw(); return; }
     captureCameraPreview();
-    previewView = previous;
     board.style.opacity = "0";
     cameraPreview.hidden = false;
   }
-  dirty = true;
   authorTip.hidden = true;
   settlingCamera = false;
   clearTimeout(cameraIdle);
   cameraIdle = setTimeout(() => {
     settlingCamera = true;
+    previewTarget = null;
     schedule();
   }, 100);
   schedule();
 }
 
+function queueCameraRefresh() {
+  if (previewTimer) return;
+  previewTimer = setTimeout(() => {
+    previewTimer = 0;
+    if (!previewView || settlingCamera || previewTarget) return;
+    previewTarget = { ...camera };
+    schedule();
+  }, 70);
+}
+
 function finishCamera() {
   if (!previewView) return;
   clearTimeout(cameraIdle);
-  cameraIdle = 0;
+  clearTimeout(previewTimer);
+  cameraIdle = previewTimer = 0;
   settlingCamera = false;
-  previewView = null;
+  previewView = previewTarget = null;
   cameraPreview.hidden = true;
   board.style.opacity = "";
   schedule();
@@ -749,11 +759,22 @@ function schedule() {
     frame = 0;
     if (previewView) {
       updateCameraPreview();
-      if (settlingCamera && render(performance.now() + 4)) finishCamera();
+      if (settlingCamera) {
+        if (render(performance.now() + 5)) finishCamera();
+      } else if (previewTarget) {
+        if (render(performance.now() + 4, previewTarget)) {
+          captureCameraPreview();
+          previewTarget = null;
+          updateCameraPreview();
+          queueCameraRefresh();
+        }
+      } else {
+        queueCameraRefresh();
+      }
       return;
     }
     flushStroke();
-    render();
+    render(performance.now() + 6);
   });
 }
 
@@ -774,27 +795,28 @@ function path(context, points, width, paint) {
 }
 
 let renderedView = null;
-function render(deadline = Infinity) {
+function render(deadline = Infinity, viewport = camera) {
   const visible = activeActions();
   if (rebuildOrder) {
     ordered = [...visible.keys()].sort();
     rebuildOrder = false;
   }
   const sx = board.width / board.clientWidth, sy = board.height / board.clientHeight;
-  if (dirty) {
+  if (dirty || !renderedView || renderedView.x !== viewport.x || renderedView.y !== viewport.y
+      || renderedView.zoom !== viewport.zoom || renderedView.angle !== viewport.angle) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, board.width, board.height);
     painted = 0;
     dirty = false;
-    renderedView = { x: camera.x, y: camera.y, zoom: camera.zoom, angle: camera.angle };
+    renderedView = { ...viewport };
   }
-  const { zoom, cos, sin } = camera;
+  const { zoom, cos, sin } = viewport;
   ctx.setTransform(sx * zoom * cos, sy * zoom * sin, -sx * zoom * sin, sy * zoom * cos,
-    sx * camera.x, sy * camera.y);
-  const [x0, y0] = world([0, 0]);
+    sx * viewport.x, sy * viewport.y);
+  const [x0, y0] = worldInView([0, 0], viewport);
   const [left, top, right, bottom] = rectangleBounds(x0, y0, board.clientWidth / zoom,
-    board.clientHeight / zoom, -camera.angle);
+    board.clientHeight / zoom, -viewport.angle);
   let checked = 0;
   while (painted < ordered.length) {
     if (deadline !== Infinity && checked++ % 64 === 0 && performance.now() >= deadline) {
@@ -846,10 +868,15 @@ function receive(id, action, image, destination = actions) {
   let bounds;
   if (action.png) bounds = rectangleBounds(action.x, action.y, action.w, action.h, action.angle || 0);
   else {
-    const xs = action.points.map(p => p[0]), ys = action.points.map(p => p[1]);
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (const [x, y] of action.points) {
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+    }
     const radius = action.width / 2;
-    bounds = [Math.min(...xs) - radius, Math.min(...ys) - radius,
-      Math.max(...xs) + radius, Math.max(...ys) + radius];
+    bounds = [left - radius, top - radius, right + radius, bottom + radius];
   }
   const entry = { action, image, bounds, waiting: Boolean(action.png && !image) };
   destination.set(id, entry);
@@ -936,18 +963,14 @@ async function undo() {
 async function connect() {
   if (!firebaseConfig.databaseURL) { status.textContent = "Локальная доска · Укажи databaseURL"; return; }
   try {
-    const [{ initializeApp }, db, authSdk] = await Promise.all([
+    const authModule = import("https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js");
+    const [{ initializeApp }, db] = await Promise.all([
       import("https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js"),
-      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-database.js"),
-      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-auth.js")
+      import("https://www.gstatic.com/firebasejs/13.2.0/firebase-database.js")
     ]);
     const app = initializeApp(firebaseConfig);
     const database = db.getDatabase(app);
-    const auth = authSdk.getAuth(app);
-    await auth.authStateReady();
-    if (!auth.currentUser) await authSdk.signInAnonymously(auth).catch(() => {});
-    configurePanel(authSdk, auth, db, database);
-    connectCursors(db, database, authSdk, auth);
+    let auth;
     const log = db.ref(database, "whiteboard/actions");
     let ready = false, online = false, denied = false, writeError = false;
     const report = () => {
@@ -956,10 +979,53 @@ async function connect() {
     };
     const fail = () => { loading = false; denied = true; writeAction = null; report(); };
     db.onValue(db.ref(database, ".info/connected"), s => { online = s.val(); report(); });
-    db.onChildAdded(log, s => { if (!actions.has(s.key)) receive(s.key, s.val()); }, fail);
-    db.onChildChanged(log, s => receive(s.key, s.val()), fail);
-    db.onChildRemoved(log, s => remove(s.key), fail);
+    let initialReceived = false, historyReady = false, guestReady = false, queueFrame = 0;
+    const history = [];
+    let nextAction = 0;
+
+    function applyHistoryChange(change, snapshot) {
+      if (change === "remove") remove(snapshot.key);
+      else if (change === "change" || !actions.has(snapshot.key)) receive(snapshot.key, snapshot.val());
+    }
+
+    function drainHistory() {
+      queueFrame = 0;
+      const deadline = performance.now() + 5;
+      do {
+        const [change, snapshot] = history[nextAction++];
+        applyHistoryChange(change, snapshot);
+      } while (nextAction < history.length && performance.now() < deadline);
+      if (nextAction < history.length) queueFrame = requestAnimationFrame(drainHistory);
+      else {
+        history.length = nextAction = 0;
+        if (initialReceived) {
+          historyReady = true;
+          enableDrawing();
+        }
+      }
+    }
+
+    function handle(change, snapshot) {
+      if (historyReady) {
+        applyHistoryChange(change, snapshot);
+      } else {
+        history.push([change, snapshot]);
+        if (!queueFrame) queueFrame = requestAnimationFrame(drainHistory);
+      }
+    }
+    db.onChildAdded(log, s => handle("add", s), fail);
+    db.onChildChanged(log, s => handle("change", s), fail);
+    db.onChildRemoved(log, s => handle("remove", s), fail);
     db.onValue(log, () => {
+      initialReceived = true;
+      if (!queueFrame) {
+        historyReady = true;
+        enableDrawing();
+      }
+    }, fail, { onlyOnce: true });
+
+    function enableDrawing() {
+      if (ready || denied || !guestReady || !historyReady) return;
       loading = false;
       ready = true;
       writeAction = (action, image) => {
@@ -975,7 +1041,16 @@ async function connect() {
       };
       deleteActions = ids => db.update(log, Object.fromEntries(ids.map(id => [id, null])));
       report();
-    }, fail, { onlyOnce: true });
+    }
+
+    const authSdk = await authModule;
+    auth = authSdk.getAuth(app);
+    await auth.authStateReady();
+    if (!auth.currentUser) await authSdk.signInAnonymously(auth).catch(() => {});
+    configurePanel(authSdk, auth, db, database);
+    connectCursors(db, database, authSdk, auth);
+    guestReady = true;
+    enableDrawing();
   } catch {
     loading = false;
     status.textContent = "Локальная доска · Firebase недоступен";
