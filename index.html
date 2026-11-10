@@ -19,7 +19,11 @@
   #frame-track button[aria-current="step"] { background: #176bbb; border-color: #8ec7ff }
   #frame-track button[data-drawn]::before { content: "◆ "; font-size: 9px }
   #animation-fps { width: 45px; font: inherit }
-  #animation-toggle { pointer-events: auto }
+  #animation-toggle, #layers-button { pointer-events: auto }
+  #layer-list { display: grid; gap: 5px; margin-block: 8px }
+  .layer-row { display: flex; gap: 6px }
+  .layer-row button:first-child { flex: 1; text-align: left }
+  #layers-button { white-space: nowrap }
   body.animation-mode footer { bottom: calc(104px + env(safe-area-inset-bottom)) }
   body.animation-mode #scheme-playback { bottom: calc(152px + env(safe-area-inset-bottom)) }
   body.focus-mode #timeline { display: none }
@@ -28,6 +32,10 @@
     body.animation-mode header { bottom: calc(104px + env(safe-area-inset-bottom)) }
     body.animation-mode #scheme-playback { bottom: auto }
   }
+  #brush-preview { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    border: 1px solid #243146; box-shadow: 0 0 0 1px #fff; border-radius: 50%; pointer-events: none; z-index: 1 }
+  #brush-preview span { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: #243146; color: white; padding: 2px 6px; border-radius: 4px; white-space: nowrap; font-size: 12px }
   #camera-preview { pointer-events: none; transform-origin: 0 0; will-change: transform }
   #reference { position: fixed; top: 0; left: 0; max-width: none; transform-origin: 0 0;
     opacity: .32; pointer-events: none; user-select: none }
@@ -100,6 +108,7 @@
 <body>
 <canvas id="board" aria-label="Холст общей доски"></canvas>
 <canvas id="camera-preview" aria-hidden="true" hidden></canvas>
+<div id="brush-preview" aria-hidden="true" hidden><span></span></div>
 <img id="reference" alt="" hidden>
 <div id="scheme-playback" role="group" aria-label="Видео схемы" hidden>
   <button id="scheme-play" type="button">Пуск</button>
@@ -119,7 +128,7 @@
     <button id="undo" aria-label="Отменить" title="Отменить (Ctrl+Z / ⌘Z)" disabled><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M8 6 3 11l5 5M3 11h11a5 5 0 0 1 0 10"/></svg><span class="tool-text">Отменить</span></button>
     <button id="reset-angle" aria-label="Выровнять холст" title="Выровнять холст" disabled><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 2-5M5 3v5h5M12 9v6m-3-3h6"/></svg><span class="tool-text">Выровнять</span></button>
     <label>Цвет <input id="color" type="color" value="#194c9e"></label>
-    <label>Размер <input id="size" type="range" min="1" max="80" value="8"></label>
+    <label>Размер <input id="size" type="range" min="1" max="512" value="8"></label>
     <label>Непрозрачность <input id="opacity" type="range" min="1" max="100" value="100"></label>
   </nav>
 </header>
@@ -128,6 +137,7 @@
   <span>ПКМ или пробел + перетаскивание · Колесо для масштаба · Alt + колесо для поворота</span>
   <div class="view-buttons">
     <button id="animation-toggle" type="button" aria-pressed="false">Анимация</button>
+    <button id="layers-button" type="button">Слои</button>
     <button id="name-button" type="button">Имя</button>
     <button id="fullscreen" type="button" aria-label="На весь экран" title="На весь экран" aria-pressed="false">⛶</button>
   </div>
@@ -145,6 +155,14 @@
   <div id="frame-track" aria-label="Кадры"></div>
 </section>
 <div id="author-tip" role="tooltip" hidden></div>
+<dialog id="layers-panel" aria-labelledby="layers-title">
+  <h2 id="layers-title">Слои</h2>
+  <div id="layer-list"></div>
+  <form method="dialog">
+    <button id="layer-add" type="button">+ Слой</button>
+    <button>Закрыть</button>
+  </form>
+</dialog>
 <dialog id="name-panel" aria-labelledby="name-title">
   <h2 id="name-title">Имя на доске</h2>
   <form method="dialog">
@@ -187,6 +205,22 @@ const board = document.querySelector("#board");
 const ctx = board.getContext("2d", { alpha: false });
 const color = document.querySelector("#color");
 const size = document.querySelector("#size");
+const brushPreview = document.querySelector("#brush-preview");
+let brushPreviewTimer = 0;
+size.addEventListener("input", () => {
+  const width = toolSize();
+  const maxPreview = Math.min(board.clientWidth, board.clientHeight) * .84;
+  const diameter = Math.max(2, Math.min(maxPreview, width * camera.zoom));
+  brushPreview.style.width = brushPreview.style.height = diameter + "px";
+  brushPreview.firstElementChild.textContent = width + " px";
+  brushPreview.hidden = false;
+  clearTimeout(brushPreviewTimer);
+  brushPreviewTimer = setTimeout(() => { brushPreview.hidden = true; }, 850);
+});
+
+function toolSize() {
+  return tool === "blur" ? Math.min(80, Number(size.value)) : Number(size.value);
+}
 const status = document.querySelector("#status");
 const buttons = document.querySelectorAll("[data-tool]");
 const undoButton = document.querySelector("#undo");
@@ -291,6 +325,55 @@ function cleanName(value) {
 let undoing = false;
 const camera = { x: 0, y: 0, zoom: 1, angle: 0, cos: 1, sin: 0 };
 const actions = new Map();
+const sharedLayers = { count: 1, selected: 0, hidden: new Set() };
+const animationLayers = { count: 1, selected: 0, hidden: new Set() };
+const layersPanel = document.querySelector("#layers-panel");
+const layerList = document.querySelector("#layer-list");
+const layerAdd = document.querySelector("#layer-add");
+const maxLayers = 8;
+const layerCanvases = new Map();
+
+function currentLayers() { return animationMode ? animationLayers : sharedLayers; }
+
+function updateLayers() {
+  const layers = currentLayers();
+  layerAdd.disabled = layers.count >= maxLayers;
+  const rows = [];
+  for (let index = layers.count - 1; index >= 0; index--) {
+    const row = document.createElement("div");
+    row.className = "layer-row";
+    const select = document.createElement("button");
+    select.type = "button";
+    select.textContent = index === 0 ? "Базовый слой" : "Слой " + (index + 1);
+    select.setAttribute("aria-pressed", String(index === layers.selected));
+    select.onclick = () => {
+      layers.selected = index;
+      if (layers.hidden.delete(index)) redraw();
+      updateLayers();
+    };
+    const visibility = document.createElement("button");
+    visibility.type = "button";
+    visibility.textContent = layers.hidden.has(index) ? "Показать" : "Скрыть";
+    visibility.setAttribute("aria-label", visibility.textContent + " " + select.textContent.toLowerCase());
+    visibility.onclick = () => {
+      if (!layers.hidden.delete(index)) layers.hidden.add(index);
+      redraw();
+      updateLayers();
+    };
+    row.append(select, visibility);
+    rows.push(row);
+  }
+  layerList.replaceChildren(...rows);
+}
+document.querySelector("#layers-button").onclick = () => { updateLayers(); layersPanel.showModal(); };
+layerAdd.onclick = () => {
+  const layers = currentLayers();
+  if (layers.count >= maxLayers) return;
+  layers.selected = layers.count++;
+  redraw();
+  updateLayers();
+  if (animationMode) saveAnimation();
+};
 const animationToggle = document.querySelector("#animation-toggle");
 const timeline = document.querySelector("#timeline");
 const frameTrack = document.querySelector("#frame-track");
@@ -343,6 +426,9 @@ async function loadAnimation() {
       return frame;
     });
     fpsInput.value = data.fps || 8;
+    if (Number.isInteger(data.layerCount)) {
+      animationLayers.count = Math.max(animationLayers.count, Math.min(maxLayers, data.layerCount));
+    }
   } catch {
     animationSaveStatus.textContent = "Память браузера недоступна";
   }
@@ -356,7 +442,7 @@ function saveAnimation() {
       const database = await openAnimationStore();
       const transaction = database.transaction("projects", "readwrite");
       const frames = animationFrames.map(frame => [...frame.actions.values()].map(entry => entry.action));
-      transaction.objectStore("projects").put({ frames, fps: animationFps() }, "local");
+      transaction.objectStore("projects").put({ frames, fps: animationFps(), layerCount: animationLayers.count }, "local");
       transaction.oncomplete = () => { animationSaveStatus.textContent = "Сохранено в браузере"; };
       transaction.onerror = transaction.onabort = () => {
         animationSaveStatus.textContent = "Не удалось сохранить анимацию";
@@ -419,6 +505,7 @@ animationToggle.onclick = async () => {
   stopAnimation();
   shareCursor(null);
   animationMode = !animationMode;
+  updateLayers();
   timeline.hidden = !animationMode;
   document.body.classList.toggle("animation-mode", animationMode);
   animationToggle.setAttribute("aria-pressed", String(animationMode));
@@ -802,8 +889,24 @@ function render(deadline = Infinity, viewport = camera) {
     rebuildOrder = false;
   }
   const sx = board.width / board.clientWidth, sy = board.height / board.clientHeight;
+  const layers = currentLayers();
+  const compositing = layers.count > 1 || layers.hidden.size > 0;
+  let compositeDirty = false;
+  const layerContexts = compositing ? new Map() : null;
   if (dirty || !renderedView || renderedView.x !== viewport.x || renderedView.y !== viewport.y
       || renderedView.zoom !== viewport.zoom || renderedView.angle !== viewport.angle) {
+    if (compositing) {
+      for (const [index, canvas] of layerCanvases) {
+        if (index >= layers.count || layers.hidden.has(index) || canvas.width !== board.width || canvas.height !== board.height) {
+          layerCanvases.delete(index);
+        } else {
+          const context = canvas.getContext("2d");
+          context.setTransform(1, 0, 0, 1, 0, 0);
+          context.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      }
+      compositeDirty = true;
+    } else layerCanvases.clear();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, board.width, board.height);
@@ -812,47 +915,85 @@ function render(deadline = Infinity, viewport = camera) {
     renderedView = { ...viewport };
   }
   const { zoom, cos, sin } = viewport;
-  ctx.setTransform(sx * zoom * cos, sy * zoom * sin, -sx * zoom * sin, sy * zoom * cos,
-    sx * viewport.x, sy * viewport.y);
+  const transform = [sx * zoom * cos, sy * zoom * sin, -sx * zoom * sin, sy * zoom * cos,
+    sx * viewport.x, sy * viewport.y];
+  ctx.setTransform(...transform);
+
+  function composite() {
+    if (!compositeDirty) return;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, board.width, board.height);
+    for (let index = 0; index < layers.count; index++) {
+      const canvas = layerCanvases.get(index);
+      if (canvas && !layers.hidden.has(index)) ctx.drawImage(canvas, 0, 0);
+    }
+    ctx.restore();
+  }
   const [x0, y0] = worldInView([0, 0], viewport);
   const [left, top, right, bottom] = rectangleBounds(x0, y0, board.clientWidth / zoom,
     board.clientHeight / zoom, -viewport.angle);
   let checked = 0;
   while (painted < ordered.length) {
     if (deadline !== Infinity && checked++ % 64 === 0 && performance.now() >= deadline) {
+      composite();
       schedule();
       return false;
     }
     const entry = visible.get(ordered[painted]);
+    const action = entry.action;
+    const layer = action.layer || 0;
     const [x, y, r, b] = entry.bounds;
-    if (r < left || b < top || x > right || y > bottom) {
+    if (layers.hidden.has(layer) || r < left || b < top || x > right || y > bottom) {
       painted++;
       continue;
     }
-    if (entry.waiting) return false;
-    const action = entry.action;
-    ctx.globalAlpha = action.opacity ?? 1;
+    if (entry.waiting) { composite(); return false; }
+    let target = ctx;
+    if (compositing) {
+      target = layerContexts.get(layer);
+      if (!target) {
+        let canvas = layerCanvases.get(layer);
+        if (!canvas) {
+          canvas = surface(board.width, board.height);
+          layerCanvases.set(layer, canvas);
+        }
+        target = canvas.getContext("2d");
+        target.setTransform(...transform);
+        layerContexts.set(layer, target);
+      }
+      compositeDirty = true;
+    }
+    target.globalAlpha = action.opacity ?? 1;
+    if (action.erase && compositing) target.globalCompositeOperation = "destination-out";
     if (entry.image) {
-      ctx.save();
-      ctx.translate(action.x, action.y);
-      ctx.rotate(action.angle || 0);
-      ctx.drawImage(entry.image, 0, 0, action.w, action.h);
-      ctx.restore();
-    } else if (!action.png) path(ctx, action.points, action.width, action.color);
-    ctx.globalAlpha = 1;
+      target.save();
+      target.translate(action.x, action.y);
+      target.rotate(action.angle || 0);
+      target.drawImage(entry.image, 0, 0, action.w, action.h);
+      target.restore();
+    } else if (!action.png) path(target, action.points, strokeWidth(action), action.color);
+    target.globalAlpha = 1;
+    if (action.erase && compositing) target.globalCompositeOperation = "source-over";
     painted++;
   }
+  composite();
   return true;
 }
 
+function strokeWidth(action) { return action.diameter ?? action.width; }
+
 function valid(a) {
   if (!a || typeof a !== "object") return false;
+  if (a.layer !== undefined && (!Number.isInteger(a.layer) || a.layer < 0 || a.layer >= maxLayers)) return false;
   if (a.opacity !== undefined && (!Number.isFinite(a.opacity) || a.opacity < 0 || a.opacity > 1)) return false;
   if (a.png) {
     return typeof a.png === "string" && a.png.startsWith("data:image/png;base64,")
       && a.png.length < 8_000_000 && [a.x, a.y, a.w, a.h].every(Number.isFinite)
       && a.w > 0 && a.h > 0 && (a.angle === undefined || Number.isFinite(a.angle));
   }
+  if (a.diameter !== undefined && (!Number.isFinite(a.diameter) || a.diameter <= 80 || a.diameter > 512)) return false;
   return typeof a.color === "string" && /^#[0-9a-f]{6}$/i.test(a.color)
     && Number.isFinite(a.width) && a.width > 0 && a.width <= 80
     && Array.isArray(a.points) && a.points.length > 0 && a.points.length <= 128
@@ -875,11 +1016,19 @@ function receive(id, action, image, destination = actions) {
       if (y < top) top = y;
       if (y > bottom) bottom = y;
     }
-    const radius = action.width / 2;
+    const radius = strokeWidth(action) / 2;
     bounds = [left - radius, top - radius, right + radius, bottom + radius];
   }
   const entry = { action, image, bounds, waiting: Boolean(action.png && !image) };
   destination.set(id, entry);
+  const layers = destination === actions ? sharedLayers : animationLayers;
+  if (action.layer >= layers.count) {
+    layers.count = action.layer + 1;
+    if (layers === currentLayers()) {
+      dirty = true;
+      if (layersPanel.open) updateLayers();
+    }
+  }
   if (destination === activeActions()) {
     if (!rebuildOrder && !existed && (!ordered.length || id > ordered[ordered.length - 1])) ordered.push(id);
     else {
@@ -917,6 +1066,7 @@ function remember(ids) {
 
 function publish(action, image, group) {
   action.name = displayName || "Гость";
+  action.layer = currentLayers().selected;
   let id;
   if (!animationMode && writeAction) id = writeAction(action, image);
   else {
@@ -1308,21 +1458,28 @@ function inspectAuthor(point) {
   const [x, y] = world(point);
   const margin = 3 / camera.zoom;
   authorTip.hidden = true;
-  for (let i = painted - 1; i >= 0; i--) {
-    const entry = activeActions().get(ordered[i]);
-    if (!entry?.action.points) continue;
-    const [left, top, right, bottom] = entry.bounds;
-    if (x < left - margin || x > right + margin || y < top - margin || y > bottom + margin) continue;
-    const { points, width, color, name } = entry.action;
-    const radius = width / 2 + (color === "#ffffff" ? 0 : margin);
-    const radiusSquared = radius * radius;
-    if (!points.some((p, j) => strokeDistanceSquared(x, y, points[Math.max(0, j - 1)], p) <= radiusSquared)) continue;
-    if (color === "#ffffff") return;
-    authorTip.textContent = cleanName(name) || "Имя не указано";
-    authorTip.hidden = false;
-    authorTip.style.left = Math.max(4, Math.min(point[0] + 12, board.clientWidth - authorTip.offsetWidth - 4)) + "px";
-    authorTip.style.top = Math.max(4, Math.min(point[1] + 14, board.clientHeight - authorTip.offsetHeight - 4)) + "px";
-    return;
+  const layers = currentLayers();
+  const visible = activeActions();
+  for (let layer = layers.count - 1; layer >= 0; layer--) {
+    if (layers.hidden.has(layer)) continue;
+    for (let i = painted - 1; i >= 0; i--) {
+      const entry = visible.get(ordered[i]);
+      if (!entry?.action.points || (entry.action.layer || 0) !== layer) continue;
+      const [left, top, right, bottom] = entry.bounds;
+      if (x < left - margin || x > right + margin || y < top - margin || y > bottom + margin) continue;
+      const { points, color, name } = entry.action;
+      const width = strokeWidth(entry.action);
+      const radius = width / 2 + (color === "#ffffff" ? 0 : margin);
+      const radiusSquared = radius * radius;
+      if (!points.some((p, j) => strokeDistanceSquared(x, y, points[Math.max(0, j - 1)], p) <= radiusSquared)) continue;
+      if (entry.action.erase) break;
+      if (color === "#ffffff") return;
+      authorTip.textContent = cleanName(name) || "Имя не указано";
+      authorTip.hidden = false;
+      authorTip.style.left = Math.max(4, Math.min(point[0] + 12, board.clientWidth - authorTip.offsetWidth - 4)) + "px";
+      authorTip.style.top = Math.max(4, Math.min(point[1] + 14, board.clientHeight - authorTip.offsetHeight - 4)) + "px";
+      return;
+    }
   }
 }
 
@@ -1337,7 +1494,7 @@ board.addEventListener("pointermove", event => {
   hoverPoint = screen(event);
   if (!hoverFrame) hoverFrame = requestAnimationFrame(() => {
     hoverFrame = 0;
-    if (hoverPoint && !stroke && !pan) inspectAuthor(hoverPoint);
+    if (hoverPoint && !stroke && !pan && !previewView) inspectAuthor(hoverPoint);
   });
 });
 
@@ -1370,7 +1527,13 @@ function flushStroke(force = false) {
     if (stroke.last) points.unshift(stroke.last);
     stroke.last = points[points.length - 1];
     if (stroke.tool === "blur") blur(points, stroke.width, stroke.ids);
-    else publish({ points, width: stroke.width, color: stroke.color, opacity: stroke.opacity }, null, stroke.ids);
+    else {
+      const action = { points, width: Math.min(stroke.width, 80), color: stroke.color,
+        opacity: stroke.opacity, erase: stroke.tool === "eraser" };
+      // Older Firebase rules still validate width against the original 80 px limit.
+      if (stroke.width > 80) action.diameter = stroke.width;
+      publish(action, null, stroke.ids);
+    }
   }
 }
 function endStroke(commit = true) {
@@ -1409,6 +1572,7 @@ function cursor() {
 
 board.oncontextmenu = e => e.preventDefault();
 board.onpointerdown = e => {
+  brushPreview.hidden = true;
   hoverPoint = null;
   authorTip.hidden = true;
   const rightMouse = e.pointerType === "mouse" && e.button === 2;
@@ -1434,7 +1598,7 @@ board.onpointerdown = e => {
   if (rightMouse || tool === "hand" || (space && e.pointerType !== "touch")) {
     pan = { id: e.pointerId, point };
     cursor();
-  } else if (loading && !animationMode) {
+  } else if ((loading && !animationMode) || currentLayers().hidden.has(currentLayers().selected)) {
     return;
   } else if (tool === "fill" || tool === "pick") {
     finishCamera();
@@ -1442,7 +1606,7 @@ board.onpointerdown = e => {
     else activate(point);
   } else {
     finishCamera();
-    stroke = { id: e.pointerId, tool, width: Number(size.value), pending: [], ids: [], start: world(point), screenStart: point,
+    stroke = { id: e.pointerId, tool, width: toolSize(), pending: [], ids: [], start: world(point), screenStart: point,
       color: tool === "eraser" ? "#ffffff" : color.value, opacity: Number(opacity.value) / 100 };
     if (e.pointerType !== "touch") { stroke.pending.push(stroke.start); schedule(); }
   }
