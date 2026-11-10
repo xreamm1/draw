@@ -603,34 +603,73 @@ function configurePanel(authSdk, auth, db, database) {
   let accountVersion = 0;
   adminAvailable = true;
   adminMessage.textContent = "";
-  authSdk.onAuthStateChanged(auth, async user => {
+  let signingIn = false;
+  const submit = login.querySelector("button");
+
+  async function withDeadline(request) {
+    let timer;
+    try {
+      return await Promise.race([
+        request,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("deadline")), 12000);
+        })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function checkAccess(user) {
     const version = ++accountVersion;
     adminUid = null;
     login.hidden = false;
     adminTools.hidden = true;
     if (!user || user.isAnonymous) return;
-    const permitted = await db.get(admin).then(() => true).catch(() => false);
-    if (version !== accountVersion) return;
-    if (permitted) {
+    adminMessage.textContent = "Проверяем доступ…";
+    try {
+      await withDeadline(db.get(admin));
+      if (version !== accountVersion || auth.currentUser?.uid !== user.uid) return;
       adminUid = user.uid;
       login.hidden = true;
       adminTools.hidden = false;
       adminMessage.textContent = "";
-    } else adminMessage.textContent = "У этой учётной записи нет доступа";
+    } catch (error) {
+      if (version !== accountVersion || auth.currentUser?.uid !== user.uid) return;
+      const denied = /permission.denied/i.test(String(error.code || error.message));
+      adminMessage.textContent = denied
+        ? "Нет доступа к панели. Проверь UID администратора в правилах Firebase."
+        : "Firebase не ответил при проверке доступа. Попробуй ещё раз.";
+    }
+  }
+
+  authSdk.onAuthStateChanged(auth, user => {
+    if (!signingIn) void checkAccess(user);
   });
   login.onsubmit = async event => {
     event.preventDefault();
+    if (signingIn) return;
     const fields = new FormData(login);
-    const submit = login.querySelector("button");
-    submit.disabled = true;
+    ++accountVersion;
+    signingIn = submit.disabled = true;
     adminMessage.textContent = "Вход…";
     try {
-      await authSdk.signInWithEmailAndPassword(auth, fields.get("email"), fields.get("password"));
-    } catch {
-      adminMessage.textContent = "Не удалось войти. Проверь почту и пароль";
+      const { user } = await withDeadline(authSdk.signInWithEmailAndPassword(
+        auth, fields.get("email").trim(), fields.get("password")));
+      await checkAccess(user);
+    } catch (error) {
+      if (error.message === "deadline" || error.code === "auth/network-request-failed") {
+        adminMessage.textContent = "Firebase не ответил при входе. Проверь подключение и попробуй снова.";
+      } else if (error.code === "auth/too-many-requests") {
+        adminMessage.textContent = "Слишком много попыток. Попробуй позже.";
+      } else if (error.code === "auth/operation-not-allowed") {
+        adminMessage.textContent = "В Firebase отключён вход по почте и паролю.";
+      } else {
+        adminMessage.textContent = "Не удалось войти. Проверь почту и пароль.";
+      }
     } finally {
       login.elements.password.value = "";
-      submit.disabled = false;
+      signingIn = submit.disabled = false;
     }
   };
   document.querySelector("#sign-out").onclick = async () => {
