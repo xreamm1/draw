@@ -46,6 +46,11 @@
   #name-button { pointer-events: auto; background: white; border-color: #d9e0e8; min-height: 44px }
   #author-tip { position: fixed; z-index: 1; pointer-events: none; background: #182230; color: white;
     padding: 5px 8px; border-radius: 6px; max-width: min(220px, calc(100vw - 16px)); overflow-wrap: anywhere }
+  #remote-cursors { position: fixed; inset: 0; overflow: hidden; pointer-events: none }
+  .remote-cursor { position: absolute; top: 0; left: 0; white-space: nowrap; font-size: 12px;
+    color: white; background: #194c9e; padding: 3px 6px; border-radius: 6px; margin: 5px }
+  .remote-cursor::before { content: "↖ "; }
+  .remote-cursor.touch::before { content: "● "; }
   .view-buttons { display: flex; align-items: center; gap: 5px }
   body.focus-mode #name-button { display: none }
   #fullscreen { pointer-events: auto; touch-action: manipulation; background: white;
@@ -68,6 +73,7 @@
 <body>
 <canvas id="board" aria-label="Холст общей доски"></canvas>
 <img id="reference" alt="" hidden>
+<div id="remote-cursors" aria-hidden="true"></div>
 <header>
   <nav aria-label="Инструменты рисования">
     <button data-tool="brush" aria-pressed="true" aria-label="Кисть" title="Кисть"><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m15 5 4 4M4 20l4-.8L20 7l-3-3L5 16z"/></svg><span class="tool-text">Кисть</span></button>
@@ -80,6 +86,7 @@
     <button id="reset-angle" aria-label="Выровнять холст" title="Выровнять холст" disabled><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 2-5M5 3v5h5M12 9v6m-3-3h6"/></svg><span class="tool-text">Выровнять</span></button>
     <label>Цвет <input id="color" type="color" value="#194c9e"></label>
     <label>Размер <input id="size" type="range" min="1" max="80" value="8"></label>
+    <label>Непрозрачность <input id="opacity" type="range" min="1" max="100" value="100"></label>
   </nav>
 </header>
 <footer>
@@ -135,6 +142,83 @@ const status = document.querySelector("#status");
 const buttons = document.querySelectorAll("[data-tool]");
 const undoButton = document.querySelector("#undo");
 const undoHistory = [];
+const opacity = document.querySelector("#opacity");
+let shareCursor = () => {};
+let touchCursorHide = 0;
+const cursorLayer = document.querySelector("#remote-cursors");
+const remoteCursors = new Map();
+
+function positionCursors() {
+  for (const { marker, data } of remoteCursors.values()) {
+    const [x, y] = view([data.x, data.y]);
+    marker.style.transform = `translate(${x}px,${y}px)`;
+    marker.hidden = Date.now() - data.updated > 15000;
+  }
+}
+
+function connectCursors(db, database, authSdk, auth) {
+  const cursors = db.ref(database, "whiteboard/cursors");
+  let own = null, online = false, enabled = false, timer = 0;
+  let pending = null, connectionVersion = 0;
+  const forget = id => {
+    remoteCursors.get(id)?.marker.remove();
+    remoteCursors.delete(id);
+  };
+  const update = snapshot => {
+    const data = snapshot.val();
+    if (snapshot.key === own?.key || ![data?.x, data?.y, data?.updated].every(Number.isFinite)) {
+      forget(snapshot.key);
+      return;
+    }
+    const marker = remoteCursors.get(snapshot.key)?.marker || document.createElement("span");
+    marker.className = data.touch ? "remote-cursor touch" : "remote-cursor";
+    marker.textContent = cleanName(data.name) || "Гость";
+    if (!marker.parentNode) cursorLayer.append(marker);
+    remoteCursors.set(snapshot.key, { marker, data });
+    positionCursors();
+  };
+  db.onChildAdded(cursors, update, () => {});
+  db.onChildChanged(cursors, update, () => {});
+  db.onChildRemoved(cursors, s => forget(s.key), () => {});
+  setInterval(positionCursors, 3000);
+
+  function attach() {
+    const version = ++connectionVersion;
+    enabled = false;
+    if (!online || !auth.currentUser) return;
+    own = db.push(cursors);
+    db.onDisconnect(own).remove().then(() => {
+      if (version === connectionVersion) enabled = true;
+    }).catch(() => {});
+  }
+  db.onValue(db.ref(database, ".info/connected"), s => {
+    online = s.val() === true;
+    attach();
+  });
+  authSdk.onAuthStateChanged(auth, () => {
+    if (enabled && own) db.remove(own).catch(() => {});
+    attach();
+  });
+  shareCursor = (point, touch = false) => {
+    if (!enabled || !own) return;
+    if (!point) {
+      clearTimeout(timer);
+      timer = 0;
+      pending = null;
+      db.remove(own).catch(() => {});
+      return;
+    }
+    const [x, y] = world(point);
+    pending = { x, y, touch, name: displayName || "Гость" };
+    if (!timer) timer = setTimeout(() => {
+      timer = 0;
+      const owner = auth.currentUser?.uid;
+      if (enabled && owner && pending) {
+        db.set(own, { ...pending, owner, updated: db.serverTimestamp() }).catch(() => {});
+      }
+    }, 80);
+  };
+}
 const nameButton = document.querySelector("#name-button");
 const namePanel = document.querySelector("#name-panel");
 const nameInput = document.querySelector("#display-name");
@@ -302,7 +386,7 @@ function resize() {
   board.height = Math.max(1, Math.round(board.clientHeight * ratio));
   redraw();
 }
-function redraw() { dirty = true; authorTip.hidden = true; positionScheme(); schedule(); }
+function redraw() { dirty = true; authorTip.hidden = true; positionScheme(); positionCursors(); schedule(); }
 function schedule() {
   if (!frame) frame = requestAnimationFrame(() => {
     frame = 0;
@@ -355,6 +439,7 @@ function render() {
     }
     if (entry.waiting) return false;
     const action = entry.action;
+    ctx.globalAlpha = action.opacity ?? 1;
     if (entry.image) {
       ctx.save();
       ctx.translate(action.x, action.y);
@@ -362,6 +447,7 @@ function render() {
       ctx.drawImage(entry.image, 0, 0, action.w, action.h);
       ctx.restore();
     } else if (!action.png) path(ctx, action.points, action.width, action.color);
+    ctx.globalAlpha = 1;
     painted++;
   }
   return true;
@@ -369,6 +455,7 @@ function render() {
 
 function valid(a) {
   if (!a || typeof a !== "object") return false;
+  if (a.opacity !== undefined && (!Number.isFinite(a.opacity) || a.opacity < 0 || a.opacity > 1)) return false;
   if (a.png) {
     return typeof a.png === "string" && a.png.startsWith("data:image/png;base64,")
       && a.png.length < 8_000_000 && [a.x, a.y, a.w, a.h].every(Number.isFinite)
@@ -475,6 +562,7 @@ async function connect() {
     await auth.authStateReady();
     if (!auth.currentUser) await authSdk.signInAnonymously(auth).catch(() => {});
     configurePanel(authSdk, auth, db, database);
+    connectCursors(db, database, authSdk, auth);
     const log = db.ref(database, "whiteboard/actions");
     let ready = false, online = false, denied = false, writeError = false;
     const report = () => {
@@ -572,7 +660,7 @@ function configurePanel(authSdk, auth, db, database) {
 function rasterAction(canvas, left, top, width, height, group) {
   const [x, y] = world([left, top]);
   publish({ x, y, w: width / camera.zoom, h: height / camera.zoom,
-    angle: -camera.angle, png: canvas.toDataURL() }, canvas, group);
+    angle: -camera.angle, opacity: group ? stroke.opacity : Number(opacity.value) / 100, png: canvas.toDataURL() }, canvas, group);
 }
 
 function sample(left, top, width, height) {
@@ -693,7 +781,11 @@ function inspectAuthor(point) {
 }
 
 let hoverPoint = null, hoverFrame = 0;
-board.onpointerleave = () => { hoverPoint = null; authorTip.hidden = true; };
+board.onpointerleave = event => {
+  hoverPoint = null;
+  authorTip.hidden = true;
+  if (event.pointerType !== "touch") shareCursor(null);
+};
 board.addEventListener("pointermove", event => {
   if (event.pointerType !== "mouse" || event.buttons || stroke || pan) return;
   hoverPoint = screen(event);
@@ -732,7 +824,7 @@ function flushStroke(force = false) {
     if (stroke.last) points.unshift(stroke.last);
     stroke.last = points[points.length - 1];
     if (stroke.tool === "blur") blur(points, stroke.width, stroke.ids);
-    else publish({ points, width: stroke.width, color: stroke.color }, null, stroke.ids);
+    else publish({ points, width: stroke.width, color: stroke.color, opacity: stroke.opacity }, null, stroke.ids);
   }
 }
 function endStroke(commit = true) {
@@ -776,6 +868,8 @@ board.onpointerdown = e => {
   const rightMouse = e.pointerType === "mouse" && e.button === 2;
   if (e.button !== 0 && !rightMouse) return;
   const point = screen(e);
+  clearTimeout(touchCursorHide);
+  shareCursor(point, e.pointerType === "touch");
   board.setPointerCapture(e.pointerId);
   if (e.pointerType === "touch") {
     touches.set(e.pointerId, point);
@@ -800,12 +894,13 @@ board.onpointerdown = e => {
     else activate(point);
   } else {
     stroke = { id: e.pointerId, tool, width: Number(size.value), pending: [], ids: [], start: world(point), screenStart: point,
-      color: tool === "eraser" ? "#ffffff" : color.value };
+      color: tool === "eraser" ? "#ffffff" : color.value, opacity: Number(opacity.value) / 100 };
     if (e.pointerType !== "touch") { stroke.pending.push(stroke.start); schedule(); }
   }
 };
 board.onpointermove = e => {
   const point = screen(e);
+  if (e.pointerType !== "touch" || touches.has(e.pointerId)) shareCursor(point, e.pointerType === "touch");
   if (touches.has(e.pointerId)) {
     touches.set(e.pointerId, point);
     if (touchNavigation) {
@@ -852,6 +947,7 @@ function release(e) {
   }
   if (pan?.id === e.pointerId) pan = null;
   if (touches.delete(e.pointerId)) {
+    if (!touches.size) touchCursorHide = setTimeout(() => shareCursor(null), 280);
     gesture = touches.size >= 2 ? touchPair() : null;
     if (!touches.size) touchNavigation = false;
   }
@@ -886,6 +982,8 @@ addEventListener("blur", () => {
   space = false;
   pan = gesture = null;
   touches.clear();
+  clearTimeout(touchCursorHide);
+  shareCursor(null);
   touchNavigation = false;
   cursor();
 });
