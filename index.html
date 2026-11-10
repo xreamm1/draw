@@ -484,7 +484,7 @@ function rectangleBounds(x, y, w, h, angle) {
 function pixel([x, y]) { return [x * board.width / board.clientWidth, y * board.height / board.clientHeight]; }
 
 const cameraPreview = document.querySelector("#camera-preview");
-let previewView = null, cameraIdle = 0, previewRefresh = 0;
+let previewView = null, cameraIdle = 0, settlingCamera = false;
 
 function captureCameraPreview() {
   if (cameraPreview.width !== board.width) cameraPreview.width = board.width;
@@ -506,25 +506,20 @@ function moveCamera() {
   }
   dirty = true;
   authorTip.hidden = true;
+  settlingCamera = false;
   clearTimeout(cameraIdle);
-  cameraIdle = setTimeout(finishCamera, 110);
-  if (!previewRefresh) previewRefresh = setTimeout(refreshCameraPreview, 260);
+  cameraIdle = setTimeout(() => {
+    settlingCamera = true;
+    schedule();
+  }, 100);
   schedule();
-}
-
-function refreshCameraPreview() {
-  previewRefresh = 0;
-  if (!previewView) return;
-  render();
-  captureCameraPreview();
-  cameraPreview.style.transform = "none";
 }
 
 function finishCamera() {
   if (!previewView) return;
   clearTimeout(cameraIdle);
-  clearTimeout(previewRefresh);
-  cameraIdle = previewRefresh = 0;
+  cameraIdle = 0;
+  settlingCamera = false;
   previewView = null;
   cameraPreview.hidden = true;
   board.style.opacity = "";
@@ -557,6 +552,7 @@ function schedule() {
     frame = 0;
     if (previewView) {
       updateCameraPreview();
+      if (settlingCamera && render(performance.now() + 4)) finishCamera();
       return;
     }
     flushStroke();
@@ -581,7 +577,7 @@ function path(context, points, width, paint) {
 }
 
 let renderedView = null;
-function render() {
+function render(deadline = Infinity) {
   if (rebuildOrder) {
     ordered = [...actions.keys()].sort();
     rebuildOrder = false;
@@ -601,7 +597,12 @@ function render() {
   const [x0, y0] = world([0, 0]);
   const [left, top, right, bottom] = rectangleBounds(x0, y0, board.clientWidth / zoom,
     board.clientHeight / zoom, -camera.angle);
+  let checked = 0;
   while (painted < ordered.length) {
+    if (deadline !== Infinity && checked++ % 64 === 0 && performance.now() >= deadline) {
+      schedule();
+      return false;
+    }
     const entry = actions.get(ordered[painted]);
     const [x, y, r, b] = entry.bounds;
     if (r < left || b < top || x > right || y > bottom) {
@@ -913,9 +914,19 @@ function fill([x, y]) {
     if (i < w * (h - 1)) visit(i + w);
   }
   // Replace the old fill color inside mixed edge pixels while keeping the contour's coverage.
+  function matchesFill(offset) {
+    return pixels[offset] === rgb[0] && pixels[offset + 1] === rgb[1] && pixels[offset + 2] === rgb[2];
+  }
+
   function shadeEdge(index, step) {
     const edge = (index + step) * 4, outside = (index + step * 2) * 4;
-    if (patch.data[edge + 3] || patch.data[outside + 3]) return;
+    if (patch.data[edge + 3]) return;
+    if (matchesFill(edge)) {
+      patch.data.set(rgb, edge);
+      patch.data[edge + 3] = 255;
+      return;
+    }
+    if (patch.data[outside + 3] && !matchesFill(outside)) return;
     let dot = 0, length = 0;
     for (let c = 0; c < 3; c++) {
       const direction = pixels[outside + c] - target[c];
@@ -932,6 +943,10 @@ function fill([x, y]) {
       patch.data[edge + c] = rgb[c] * (1 - coverage) + pixels[outside + c] * coverage;
     }
     patch.data[edge + 3] = 255;
+    if (matchesFill(outside)) {
+      patch.data.set(rgb, outside);
+      patch.data[outside + 3] = 255;
+    }
   }
 
   for (let j = 0; j < tail; j++) {
