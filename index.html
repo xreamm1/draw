@@ -40,16 +40,23 @@
   header { top: max(12px, env(safe-area-inset-top)) }
   footer { bottom: max(12px, env(safe-area-inset-bottom)) }
   button:disabled { opacity: .5; cursor: default }
-  .touch-help { display: none }
-  @media (pointer: coarse) {
-    button, input[type="color"], input[type="range"] { min-height: 44px }
-    .mouse-help { display: none }
-    .touch-help { display: inline }
-  }
-  @media (max-width: 480px) {
-    nav { gap: 4px; padding: 6px }
-    button { padding-inline: 7px }
-    footer { font-size: 12px }
+  .tool-icon, #fullscreen { display: none }
+  body.focus-mode header, body.focus-mode footer > span, body.focus-mode #status { display: none }
+  body.focus-mode footer { justify-content: flex-end }
+  #fullscreen { pointer-events: auto; touch-action: manipulation; background: white;
+    border-color: #d9e0e8; min-width: 44px; font-size: 20px }
+  @media (pointer: coarse), (max-width: 540px) {
+    header { top: auto; bottom: max(8px, env(safe-area-inset-bottom)); left: 0; right: 0;
+      padding-inline: max(6px, env(safe-area-inset-left)) max(6px, env(safe-area-inset-right)) }
+    nav { width: fit-content; margin-inline: auto; gap: 3px; padding: 4px; justify-content: center }
+    nav button { flex: 0 0 44px; width: 44px; min-height: 44px; padding: 0 }
+    nav label { min-height: 44px }
+    .tool-icon { display: block; margin: auto; width: 22px; height: 22px; fill: none;
+      stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round }
+    .tool-text, footer > span { display: none }
+    footer { bottom: auto; top: max(8px, env(safe-area-inset-top)); align-items: center; font-size: 12px }
+    #status, #fullscreen { min-height: 44px }
+    #fullscreen { display: inline-block }
   }
 </style>
 </head>
@@ -58,20 +65,22 @@
 <img id="reference" alt="" hidden>
 <header>
   <nav aria-label="Инструменты рисования">
-    <button data-tool="brush" aria-pressed="true">Кисть</button>
-    <button data-tool="eraser" aria-pressed="false">Ластик</button>
-    <button data-tool="pick" aria-pressed="false">Пипетка</button>
-    <button data-tool="fill" aria-pressed="false">Заливка</button>
-    <button data-tool="blur" aria-pressed="false">Размытие</button>
-    <button data-tool="hand" aria-pressed="false">Рука</button>
-    <button id="undo" title="Ctrl+Z / ⌘Z" disabled>Отменить</button>
+    <button data-tool="brush" aria-pressed="true" aria-label="Кисть" title="Кисть"><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m15 5 4 4M4 20l4-.8L20 7l-3-3L5 16z"/></svg><span class="tool-text">Кисть</span></button>
+    <button data-tool="eraser" aria-pressed="false" aria-label="Ластик" title="Ластик"><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m4 15 10-11 6 6-9 10H8zM9 10l7 7M11 20h9"/></svg><span class="tool-text">Ластик</span></button>
+    <button data-tool="pick" aria-pressed="false" aria-label="Пипетка" title="Пипетка"><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6 4 4m-3-5 2-2 4 4-2 2M15 8 5 18l-1 3 3-1L17 10"/></svg><span class="tool-text">Пипетка</span></button>
+    <button data-tool="fill" aria-pressed="false" aria-label="Заливка" title="Заливка"><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m3 13 8-8 7 7-8 8zM3 13h14M9 3l5 5m6 7c1 1 2 2 2 3a2 2 0 0 1-4 0c0-1 1-2 2-3z"/></svg><span class="tool-text">Заливка</span></button>
+    <button data-tool="blur" aria-pressed="false" aria-label="Размытие" title="Размытие"><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3c2 4 6 7 6 11a6 6 0 0 1-12 0c0-4 4-7 6-11zM9 15a3 3 0 0 0 3 3"/></svg><span class="tool-text">Размытие</span></button>
+    <button data-tool="hand" aria-pressed="false" aria-label="Рука" title="Рука"><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M7 13V7a1.5 1.5 0 0 1 3 0v4-6a1.5 1.5 0 0 1 3 0v6-5a1.5 1.5 0 0 1 3 0v6-3a1.5 1.5 0 0 1 3 0v6a6 6 0 0 1-6 6h-1c-3 0-4-2-5-4l-3-4a1.5 1.5 0 0 1 2-2z"/></svg><span class="tool-text">Рука</span></button>
+    <button id="undo" aria-label="Отменить" title="Отменить (Ctrl+Z / ⌘Z)" disabled><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M8 6 3 11l5 5M3 11h11a5 5 0 0 1 0 10"/></svg><span class="tool-text">Отменить</span></button>
+    <button id="reset-angle" aria-label="Выровнять холст" title="Выровнять холст" disabled><svg class="tool-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 2-5M5 3v5h5M12 9v6m-3-3h6"/></svg><span class="tool-text">Выровнять</span></button>
     <label>Цвет <input id="color" type="color" value="#194c9e"></label>
     <label>Размер <input id="size" type="range" min="1" max="80" value="8"></label>
   </nav>
 </header>
 <footer>
   <button id="status" type="button" aria-live="polite">Подключение…</button>
-  <span><span class="mouse-help">ПКМ или пробел + перетаскивание · Колесо для масштаба</span><span class="touch-help">Один палец рисует · Два пальца перемещают и меняют масштаб</span></span>
+  <span>ПКМ или пробел + перетаскивание · Колесо для масштаба · Alt + колесо для поворота</span>
+  <button id="fullscreen" type="button" aria-label="На весь экран" title="На весь экран" aria-pressed="false">⛶</button>
 </footer>
 <dialog id="panel" aria-labelledby="panel-title">
   <h2 id="panel-title">Управление доской</h2>
@@ -110,7 +119,7 @@ const buttons = document.querySelectorAll("[data-tool]");
 const undoButton = document.querySelector("#undo");
 const undoHistory = [];
 let undoing = false;
-const camera = { x: 0, y: 0, zoom: 1 };
+const camera = { x: 0, y: 0, zoom: 1, angle: 0, cos: 1, sin: 0 };
 const actions = new Map();
 const coarse = matchMedia("(pointer: coarse)");
 const panel = document.querySelector("#panel");
@@ -153,12 +162,14 @@ schemeFile.onchange = async () => {
   try {
     await image.decode();
     if (scheme) URL.revokeObjectURL(scheme.url);
-    const scale = Math.min(board.clientWidth * .85 / image.naturalWidth,
-      board.clientHeight * .8 / image.naturalHeight, 1);
-    const width = image.naturalWidth * scale;
-    const height = image.naturalHeight * scale;
-    const [x, y] = world([(board.clientWidth - width) / 2, (board.clientHeight - height) / 2]);
-    scheme = { url, x, y, w: width / camera.zoom, h: height / camera.zoom };
+    const cos = Math.abs(camera.cos), sin = Math.abs(camera.sin);
+    const projectedWidth = image.naturalWidth * cos + image.naturalHeight * sin;
+    const projectedHeight = image.naturalWidth * sin + image.naturalHeight * cos;
+    const scale = Math.min(board.clientWidth * .85 / projectedWidth,
+      board.clientHeight * .8 / projectedHeight, 1) / camera.zoom;
+    const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
+    const [cx, cy] = world([board.clientWidth / 2, board.clientHeight / 2]);
+    scheme = { url, x: cx - w / 2, y: cy - h / 2, w, h };
     reference.src = url;
     reference.hidden = false;
     schemeRemove.disabled = false;
@@ -175,8 +186,8 @@ function positionScheme() {
   const { x, y, w, h } = scheme;
   reference.style.width = w + "px";
   reference.style.height = h + "px";
-  reference.style.transform = "translate(" + (x * camera.zoom + camera.x) + "px,"
-    + (y * camera.zoom + camera.y) + "px) scale(" + camera.zoom + ")";
+  const [left, top] = view([x, y]);
+  reference.style.transform = `translate(${left}px,${top}px) rotate(${camera.angle}rad) scale(${camera.zoom})`;
 }
 let tool = "brush", space = false, pan = null, stroke = null;
 let ordered = [], painted = 0, dirty = true, rebuildOrder = false, frame = 0, localId = 0;
@@ -189,6 +200,32 @@ for (const button of buttons) button.onclick = event => {
   if (event.detail) button.blur();
 };
 undoButton.onclick = undo;
+const resetAngle = document.querySelector("#reset-angle");
+resetAngle.onclick = () => {
+  const center = [board.clientWidth / 2, board.clientHeight / 2];
+  transformView(center, center, 1, -camera.angle);
+};
+
+const fullscreen = document.querySelector("#fullscreen");
+function focusMode(active) {
+  document.body.classList.toggle("focus-mode", active);
+  const label = active ? "Показать инструменты" : "На весь экран";
+  fullscreen.setAttribute("aria-label", label);
+  fullscreen.title = label;
+  fullscreen.setAttribute("aria-pressed", String(active));
+  fullscreen.textContent = active ? "×" : "⛶";
+}
+fullscreen.onclick = async () => {
+  const active = !document.body.classList.contains("focus-mode");
+  focusMode(active);
+  try {
+    if (active && document.fullscreenEnabled) await document.documentElement.requestFullscreen();
+    if (!active && document.fullscreenElement === document.documentElement) await document.exitFullscreen();
+  } catch { /* The tools can still be hidden in browsers that restrict fullscreen. */ }
+};
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement) focusMode(false);
+});
 function select(next) {
   tool = next;
   cursor();
@@ -205,7 +242,20 @@ function surface(width, height) {
 }
 
 function screen(e) { return [e.clientX, e.clientY]; }
-function world([x, y]) { return [(x - camera.x) / camera.zoom, (y - camera.y) / camera.zoom]; }
+function world([x, y]) {
+  const dx = (x - camera.x) / camera.zoom, dy = (y - camera.y) / camera.zoom;
+  return [dx * camera.cos + dy * camera.sin, dy * camera.cos - dx * camera.sin];
+}
+function view([x, y]) {
+  return [camera.x + (x * camera.cos - y * camera.sin) * camera.zoom,
+    camera.y + (x * camera.sin + y * camera.cos) * camera.zoom];
+}
+function rectangleBounds(x, y, w, h, angle) {
+  const dx = w * Math.cos(angle), dy = w * Math.sin(angle);
+  const ux = -h * Math.sin(angle), uy = h * Math.cos(angle);
+  return [x + Math.min(0, dx) + Math.min(0, ux), y + Math.min(0, dy) + Math.min(0, uy),
+    x + Math.max(0, dx) + Math.max(0, ux), y + Math.max(0, dy) + Math.max(0, uy)];
+}
 function pixel([x, y]) { return [x * board.width / board.clientWidth, y * board.height / board.clientHeight]; }
 
 function resize() {
@@ -253,9 +303,12 @@ function render() {
     painted = 0;
     dirty = false;
   }
-  ctx.setTransform(sx * camera.zoom, 0, 0, sy * camera.zoom, sx * camera.x, sy * camera.y);
-  const [left, top] = world([0, 0]);
-  const [right, bottom] = world([board.clientWidth, board.clientHeight]);
+  const { zoom, cos, sin } = camera;
+  ctx.setTransform(sx * zoom * cos, sy * zoom * sin, -sx * zoom * sin, sy * zoom * cos,
+    sx * camera.x, sy * camera.y);
+  const [x0, y0] = world([0, 0]);
+  const [left, top, right, bottom] = rectangleBounds(x0, y0, board.clientWidth / zoom,
+    board.clientHeight / zoom, -camera.angle);
   while (painted < ordered.length) {
     const entry = actions.get(ordered[painted]);
     const [x, y, r, b] = entry.bounds;
@@ -265,8 +318,13 @@ function render() {
     }
     if (entry.waiting) return false;
     const action = entry.action;
-    if (entry.image) ctx.drawImage(entry.image, action.x, action.y, action.w, action.h);
-    else if (!action.png) path(ctx, action.points, action.width, action.color);
+    if (entry.image) {
+      ctx.save();
+      ctx.translate(action.x, action.y);
+      ctx.rotate(action.angle || 0);
+      ctx.drawImage(entry.image, 0, 0, action.w, action.h);
+      ctx.restore();
+    } else if (!action.png) path(ctx, action.points, action.width, action.color);
     painted++;
   }
   return true;
@@ -277,7 +335,7 @@ function valid(a) {
   if (a.png) {
     return typeof a.png === "string" && a.png.startsWith("data:image/png;base64,")
       && a.png.length < 8_000_000 && [a.x, a.y, a.w, a.h].every(Number.isFinite)
-      && a.w > 0 && a.h > 0;
+      && a.w > 0 && a.h > 0 && (a.angle === undefined || Number.isFinite(a.angle));
   }
   return typeof a.color === "string" && /^#[0-9a-f]{6}$/i.test(a.color)
     && Number.isFinite(a.width) && a.width > 0 && a.width <= 80
@@ -292,7 +350,7 @@ function receive(id, action, image) {
     return;
   }
   let bounds;
-  if (action.png) bounds = [action.x, action.y, action.x + action.w, action.y + action.h];
+  if (action.png) bounds = rectangleBounds(action.x, action.y, action.w, action.h, action.angle || 0);
   else {
     const xs = action.points.map(p => p[0]), ys = action.points.map(p => p[1]);
     const radius = action.width / 2;
@@ -475,7 +533,8 @@ function configurePanel(authSdk, auth, db, database) {
 
 function rasterAction(canvas, left, top, width, height, group) {
   const [x, y] = world([left, top]);
-  publish({ x, y, w: width / camera.zoom, h: height / camera.zoom, png: canvas.toDataURL() }, canvas, group);
+  publish({ x, y, w: width / camera.zoom, h: height / camera.zoom,
+    angle: -camera.angle, png: canvas.toDataURL() }, canvas, group);
 }
 
 function sample(left, top, width, height) {
@@ -523,10 +582,10 @@ function fill([x, y]) {
 
 function blur(points, width, group) {
   if (!render()) return;
-  const view = points.map(([x, y]) => [x * camera.zoom + camera.x, y * camera.zoom + camera.y]);
+  const projected = points.map(view);
   const diameter = width * camera.zoom;
   const padding = diameter * 1.5 + 4;
-  const xs = view.map(p => p[0]), ys = view.map(p => p[1]);
+  const xs = projected.map(p => p[0]), ys = projected.map(p => p[1]);
   const left = Math.max(0, Math.floor(Math.min(...xs) - padding));
   const top = Math.max(0, Math.floor(Math.min(...ys) - padding));
   const w = Math.min(board.clientWidth, Math.ceil(Math.max(...xs) + padding)) - left;
@@ -548,18 +607,32 @@ function blur(points, width, group) {
   }
   const mask = surface(image.width, image.height);
   const m = mask.getContext("2d");
-  path(m, view.map(([x, y]) => [(x - left) * scale, (y - top) * sy]), diameter * scale, "black");
+  path(m, projected.map(([x, y]) => [(x - left) * scale, (y - top) * sy]), diameter * scale, "black");
   out.globalCompositeOperation = "destination-in";
   out.drawImage(mask, 0, 0);
   rasterAction(image, left, top, w, h, group);
+}
+
+function sampleScheme(point) {
+  if (!scheme || !reference.complete || !reference.naturalWidth) return null;
+  const [x, y] = world(point);
+  const u = (x - scheme.x) / scheme.w, v = (y - scheme.y) / scheme.h;
+  if (u < 0 || v < 0 || u >= 1 || v >= 1) return null;
+  const sample = surface(1, 1).getContext("2d");
+  sample.drawImage(reference, Math.floor(u * reference.naturalWidth),
+    Math.floor(v * reference.naturalHeight), 1, 1, 0, 0, 1, 1);
+  const rgba = sample.getImageData(0, 0, 1, 1).data;
+  return rgba[3] ? rgba : null;
 }
 
 function activate(point) {
   const [x, y] = point;
   if (x < 0 || y < 0 || x >= board.clientWidth || y >= board.clientHeight) return;
   if (tool === "fill") fill(point);
-  if (tool === "pick" && render()) {
-    const rgb = ctx.getImageData(...pixel(point).map(Math.floor), 1, 1).data;
+  if (tool === "pick") {
+    const source = sampleScheme(point);
+    if (!source && !render()) return;
+    const rgb = source || ctx.getImageData(...pixel(point).map(Math.floor), 1, 1).data;
     color.value = "#" + Array.from(rgb.slice(0, 3), n => n.toString(16).padStart(2, "0")).join("");
     select("brush");
   }
@@ -595,16 +668,23 @@ function endStroke(commit = true) {
   stroke = null;
 }
 
-function zoom(from, to, factor) {
-  const [x, y] = world(from);
+function transformView(from, to, factor, turn = 0) {
+  const anchor = world(from);
   camera.zoom = Math.max(0.05, Math.min(32, camera.zoom * factor));
-  camera.x = to[0] - x * camera.zoom;
-  camera.y = to[1] - y * camera.zoom;
+  camera.angle = Math.atan2(Math.sin(camera.angle + turn), Math.cos(camera.angle + turn));
+  if (Math.abs(camera.angle) < 1e-8) camera.angle = 0;
+  camera.cos = Math.cos(camera.angle);
+  camera.sin = Math.sin(camera.angle);
+  const [x, y] = view(anchor);
+  camera.x += to[0] - x;
+  camera.y += to[1] - y;
+  resetAngle.disabled = camera.angle === 0;
   redraw();
 }
 function touchPair() {
   const [[x, y], [u, v]] = [...touches.values()];
-  return { center: [(x + u) / 2, (y + v) / 2], distance: Math.max(1, Math.hypot(u - x, v - y)) };
+  return { center: [(x + u) / 2, (y + v) / 2], distance: Math.hypot(u - x, v - y),
+    angle: Math.atan2(v - y, u - x) };
 }
 function cursor() {
   board.classList.toggle("pan", space || tool === "hand");
@@ -651,7 +731,11 @@ board.onpointermove = e => {
     if (touchNavigation) {
       if (touches.size >= 2) {
         const next = touchPair();
-        if (gesture) zoom(gesture.center, next.center, next.distance / gesture.distance);
+        if (gesture) {
+          const stable = next.distance > 12 && gesture.distance > 12;
+          transformView(gesture.center, next.center, stable ? next.distance / gesture.distance : 1,
+            stable ? next.angle - gesture.angle : 0);
+        }
         gesture = next;
       }
       return;
@@ -699,9 +783,12 @@ board.addEventListener("wheel", e => {
   e.preventDefault();
   const point = screen(e);
   const units = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? board.clientHeight : 1;
-  zoom(point, point, Math.exp(-e.deltaY * units * 0.0015));
+  const delta = e.deltaY * units;
+  if (e.altKey) transformView(point, point, 1, delta * 0.002);
+  else transformView(point, point, Math.exp(-delta * 0.0015));
 }, { passive: false });
 addEventListener("keydown", e => {
+  if (e.code === "Escape" && !panel.open && !document.fullscreenElement) focusMode(false);
   if (e.target.closest?.("textarea, [contenteditable]")) return;
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === "KeyZ") {
     e.preventDefault();
