@@ -184,6 +184,9 @@
     <button id="scheme-toggle" disabled>Скрыть схему</button>
     <label>Прозрачность схемы <input id="scheme-transparency" type="range" min="0" max="100" value="68" disabled></label>
     <button id="scheme-remove" disabled>Удалить схему</button>
+    <button id="board-export" type="button">Экспорт доски (JSON)</button>
+    <button id="board-import" type="button">Импорт мазков (JSON)</button>
+    <input id="board-import-file" type="file" accept=".json,application/json" hidden>
     <button id="clear-board">Удалить всё с общей доски</button>
     <button id="sign-out">Выйти</button>
   </div>
@@ -1252,6 +1255,11 @@ async function connect() {
 
 function configurePanel(authSdk, auth, db, database) {
   const admin = db.ref(database, "adminUid");
+  const log = db.ref(database, "whiteboard/actions");
+  const exportButton = document.querySelector("#board-export");
+  const importButton = document.querySelector("#board-import");
+  const importFile = document.querySelector("#board-import-file");
+  let boardTransfer = false;
   let adminUid = null;
   let accountVersion = 0;
   adminAvailable = true;
@@ -1259,13 +1267,13 @@ function configurePanel(authSdk, auth, db, database) {
   let signingIn = false;
   const submit = login.querySelector("button");
 
-  async function withDeadline(request) {
+  async function withDeadline(request, milliseconds = 12000) {
     let timer;
     try {
       return await Promise.race([
         request,
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error("deadline")), 12000);
+          timer = setTimeout(() => reject(new Error("deadline")), milliseconds);
         })
       ]);
     } finally {
@@ -1334,17 +1342,104 @@ function configurePanel(authSdk, auth, db, database) {
       adminMessage.textContent = "Не удалось восстановить гостевой вход";
     }
   };
-  clearBoard.onclick = async () => {
-    if (!adminUid || auth.currentUser?.uid !== adminUid) return;
-    if (!confirm("Удалить все рисунки с общей доски для всех участников?")) return;
-    clearBoard.disabled = true;
+  function canTransferBoard() {
+    if (!adminUid || auth.currentUser?.uid !== adminUid || boardTransfer) return false;
+    if (!loading) return true;
+    adminMessage.textContent = "Подожди, пока загрузится общая доска.";
+    return false;
+  }
+
+  function setTransfer(active) {
+    boardTransfer = active;
+    exportButton.disabled = importButton.disabled = clearBoard.disabled = active;
+  }
+
+  exportButton.onclick = async () => {
+    if (!canTransferBoard()) return;
+    setTransfer(true);
+    adminMessage.textContent = "Готовим экспорт…";
     try {
-      await db.remove(db.ref(database, "whiteboard/actions"));
+      const snapshot = await withDeadline(db.get(log), 60000);
+      const data = JSON.stringify({ format: "draw-board-v1", actions: snapshot.val() || {} });
+      const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "draw-board-" + new Date().toISOString().slice(0, 10) + ".json";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      adminMessage.textContent = "Экспорт готов.";
+    } catch {
+      adminMessage.textContent = "Не удалось экспортировать доску. Попробуй ещё раз.";
+    } finally {
+      setTransfer(false);
+    }
+  };
+
+  importButton.onclick = () => { if (canTransferBoard()) importFile.click(); };
+  importFile.onchange = async () => {
+    const file = importFile.files[0];
+    importFile.value = "";
+    if (!file || !canTransferBoard()) return;
+    setTransfer(true);
+    adminMessage.textContent = "Проверяем файл…";
+    let added = 0, skipped = 0;
+    try {
+      if (file.size > 150 * 1024 * 1024) throw new Error("size");
+      const data = JSON.parse((await file.text()).replace(/^\uFEFF/, ""));
+      const imported = data?.format === "draw-board-v1" ? data.actions : data;
+      if (!imported || typeof imported !== "object" || Array.isArray(imported)) throw new Error("format");
+      const entries = Object.entries(imported);
+      if (entries.some(([key, action]) => !/^[-_0-9A-Za-z]{1,120}$/.test(key) || !valid(action))) {
+        throw new Error("format");
+      }
+      if (!confirm("Добавить из файла только мазки, которых ещё нет на общей доске?")) {
+        adminMessage.textContent = "Импорт отменён.";
+        return;
+      }
+
+      const importingUser = adminUid;
+      let batch = [], batchSize = 0;
+      async function sendBatch() {
+        if (!batch.length) return;
+        if (auth.currentUser?.uid !== importingUser) throw new Error("account");
+        await db.update(log, Object.fromEntries(batch));
+        added += batch.length;
+        adminMessage.textContent = "Добавлено мазков: " + added;
+        batch = [];
+        batchSize = 0;
+      }
+
+      for (const [key, action] of entries) {
+        if (actions.has(key)) { skipped++; continue; }
+        const bytes = JSON.stringify(action).length * 3 + key.length;
+        if (batch.length >= 1000 || batchSize + bytes > 1_500_000) await sendBatch();
+        batch.push([key, action]);
+        batchSize += bytes;
+      }
+      await sendBatch();
+      adminMessage.textContent = `Добавлено: ${added}. Уже на доске: ${skipped}.`;
+    } catch (error) {
+      adminMessage.textContent = error.message === "size" ? "Файл больше 150 МБ."
+        : error instanceof SyntaxError || error.message === "format" ? "Выбери JSON экспорта этой доски."
+        : `Импорт прерван. Добавлено: ${added}. Можно повторить импорт того же файла.`;
+    } finally {
+      setTransfer(false);
+    }
+  };
+
+  clearBoard.onclick = async () => {
+    if (!adminUid || auth.currentUser?.uid !== adminUid || boardTransfer) return;
+    if (!confirm("Удалить все рисунки с общей доски для всех участников?")) return;
+    setTransfer(true);
+    try {
+      await db.remove(log);
       adminMessage.textContent = "Общая доска очищена";
     } catch {
       adminMessage.textContent = "Не удалось очистить доску. Проверь правила Firebase";
     } finally {
-      clearBoard.disabled = false;
+      setTransfer(false);
     }
   };
 }
